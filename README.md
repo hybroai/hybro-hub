@@ -168,19 +168,48 @@ hybro-hub agents
 
 ### `hybro-hub agent start`
 
-Launch a local A2A agent from a bundled adapter.
+Launch a local A2A agent from a bundled adapter. Supported adapters: **ollama**, **openclaw**, **n8n**.
+
+**Ollama** — local LLM (requires [Ollama](https://ollama.com)):
 
 ```bash
-hybro-hub agent start ollama --model llama3.2:8b --port 10010
+hybro-hub agent start ollama
+hybro-hub agent start ollama --model mistral:7b --port 10020 --system-prompt "You are a helpful assistant"
 ```
+
+**OpenClaw** — AI coding agent (requires [OpenClaw](https://openclaw.com)):
+
+```bash
+hybro-hub agent start openclaw
+hybro-hub agent start openclaw --thinking medium --agent-id main
+```
+
+**n8n** — workflow automation (requires a running [n8n](https://n8n.io) instance):
+
+```bash
+hybro-hub agent start n8n --webhook-url http://localhost:5678/webhook/my-agent
+```
+
+**Common options:**
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--model` | `llama3.2:8b` | Ollama model to use |
 | `--port` | `10010` | Port for the A2A agent server |
-| `--system-prompt` | — | Custom system prompt |
+| `--name` | auto | Agent display name |
+| `--timeout` | varies | Request timeout in seconds |
 
-> Requires [Ollama](https://ollama.com) running locally. Install the `a2a-adapter` package for the Ollama adapter: `pip install "hybro-sdk[ollama]"`
+**Adapter-specific options:**
+
+| Option | Adapter | Description |
+|--------|---------|-------------|
+| `--model` | ollama | Ollama model (default: `llama3.2:8b`) |
+| `--system-prompt` | ollama | Custom system prompt |
+| `--thinking` | openclaw | Thinking level: off/minimal/low/medium/high/xhigh |
+| `--agent-id` | openclaw | OpenClaw agent ID |
+| `--openclaw-path` | openclaw | Path to the openclaw binary |
+| `--webhook-url` | n8n | Webhook URL (required) |
+
+> Requires the `a2a-adapter` package: `pip install a2a-adapter`
 
 ---
 

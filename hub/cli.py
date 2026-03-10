@@ -116,40 +116,123 @@ def agents(ctx: click.Context) -> None:
     asyncio.run(_agents())
 
 
-# ──── hybro-hub agent start ollama ────
+# ──── hybro-hub agent start ────
 
 @main.group()
 def agent() -> None:
     """Manage local agent adapters."""
 
 
-@agent.command("start")
-@click.argument("adapter_type")
-@click.option("--model", default="llama3.2:8b", help="Ollama model name.")
-@click.option("--port", default=10010, type=int, help="Port for the A2A server.")
-@click.option("--system-prompt", default=None, help="System prompt for the model.")
-def agent_start(adapter_type: str, model: str, port: int, system_prompt: str | None) -> None:
-    """Start a local A2A agent adapter (e.g. 'ollama')."""
-    if adapter_type == "ollama":
-        try:
-            from a2a_adapter import OllamaAdapter, serve_agent
-        except ImportError:
-            click.echo(
-                "Error: a2a-adapter package not installed.\n"
-                "Install with: pip install a2a-adapter",
-                err=True,
-            )
-            sys.exit(1)
+_CLI_ADAPTERS = {
+    "ollama": {
+        "description": "Local LLM via Ollama",
+        "install_hint": "pip install a2a-adapter",
+    },
+    "openclaw": {
+        "description": "OpenClaw AI agent via CLI subprocess",
+        "install_hint": "pip install a2a-adapter",
+    },
+    "n8n": {
+        "description": "n8n workflow via webhook",
+        "install_hint": "pip install a2a-adapter",
+    },
+}
 
-        click.echo(f"Starting Ollama A2A adapter (model={model}, port={port})...")
-        adapter = OllamaAdapter(
-            model=model,
-            name=f"Ollama ({model})",
-            description=f"Local LLM via Ollama ({model})",
-            system_prompt=system_prompt,
+
+@agent.command("start")
+@click.argument("adapter_type", type=click.Choice(sorted(_CLI_ADAPTERS), case_sensitive=False))
+@click.option("--port", default=10010, type=int, help="Port for the A2A server.")
+@click.option("--name", "agent_name", default=None, help="Agent display name.")
+@click.option("--model", default=None, help="[ollama] Model name (default: llama3.2:8b).")
+@click.option("--system-prompt", default=None, help="[ollama] System prompt.")
+@click.option("--thinking", default=None, help="[openclaw] Thinking level (off/minimal/low/medium/high/xhigh).")
+@click.option("--agent-id", default=None, help="[openclaw] OpenClaw agent ID.")
+@click.option("--openclaw-path", default=None, help="[openclaw] Path to openclaw binary.")
+@click.option("--webhook-url", default=None, help="[n8n] Webhook URL (required for n8n).")
+@click.option("--timeout", default=None, type=int, help="Request timeout in seconds.")
+def agent_start(
+    adapter_type: str,
+    port: int,
+    agent_name: str | None,
+    model: str | None,
+    system_prompt: str | None,
+    thinking: str | None,
+    agent_id: str | None,
+    openclaw_path: str | None,
+    webhook_url: str | None,
+    timeout: int | None,
+) -> None:
+    """Start a local A2A agent adapter.
+
+    Supported adapters: ollama, openclaw, n8n.
+
+    \b
+    Examples:
+      hybro-hub agent start ollama
+      hybro-hub agent start ollama --model mistral:7b --port 10020
+      hybro-hub agent start openclaw --thinking medium
+      hybro-hub agent start n8n --webhook-url http://localhost:5678/webhook/agent
+    """
+    try:
+        from a2a_adapter import serve_agent
+        from a2a_adapter.loader import load_adapter
+    except ImportError:
+        click.echo(
+            "Error: a2a-adapter package not installed.\n"
+            f"Install with: {_CLI_ADAPTERS[adapter_type]['install_hint']}",
+            err=True,
         )
-        serve_agent(adapter, port=port)
-    else:
-        click.echo(f"Unknown adapter type: {adapter_type}", err=True)
-        click.echo("Supported adapters: ollama", err=True)
         sys.exit(1)
+
+    config: dict = {"adapter": adapter_type}
+
+    if adapter_type == "ollama":
+        config["model"] = model or "llama3.2:8b"
+        config["name"] = agent_name or f"Ollama ({config['model']})"
+        config["description"] = f"Local LLM via Ollama ({config['model']})"
+        if system_prompt:
+            config["system_prompt"] = system_prompt
+        if timeout:
+            config["timeout"] = timeout
+
+    elif adapter_type == "openclaw":
+        config["name"] = agent_name or "OpenClaw Agent"
+        config["description"] = "OpenClaw AI agent"
+        if thinking:
+            config["thinking"] = thinking
+        if agent_id:
+            config["agent_id"] = agent_id
+        if openclaw_path:
+            config["openclaw_path"] = openclaw_path
+        if timeout:
+            config["timeout"] = timeout
+
+    elif adapter_type == "n8n":
+        if not webhook_url:
+            click.echo("Error: --webhook-url is required for n8n adapter.", err=True)
+            sys.exit(1)
+        config["webhook_url"] = webhook_url
+        config["name"] = agent_name or "n8n Workflow Agent"
+        config["description"] = "n8n workflow agent"
+        if timeout:
+            config["timeout"] = timeout
+
+    try:
+        adapter = load_adapter(config)
+    except ImportError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Starting {adapter_type} A2A adapter (port={port})...")
+    click.echo(f"  Name: {config.get('name', adapter_type)}")
+    if adapter_type == "ollama":
+        click.echo(f"  Model: {config['model']}")
+    elif adapter_type == "openclaw":
+        click.echo(f"  Thinking: {config.get('thinking', 'low')}")
+    elif adapter_type == "n8n":
+        click.echo(f"  Webhook: {webhook_url}")
+
+    serve_agent(adapter, port=port)
