@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from .agent_registry import AgentRegistry
-from .config import HubConfig
+from .config import HYBRO_DIR, HubConfig
 from .dispatcher import Dispatcher
 from .privacy_router import PrivacyRouter
 from .relay_client import RelayClient
@@ -52,6 +52,7 @@ class HubDaemon:
         )
         self._shutdown_event = asyncio.Event()
         self._last_sync_payload: list[dict] | None = None
+        self._drain_task: asyncio.Task | None = None
 
     async def run(self) -> None:
         """Main entry point — run the hub daemon."""
@@ -74,6 +75,25 @@ class HubDaemon:
 
     async def _startup(self) -> None:
         logger.info("Starting hub daemon (hub_id=%s)", self.config.hub_id)
+
+        # Initialise the disk-backed publish queue before registering so that
+        # any failures during startup can also fall back to the queue.
+        if self.config.publish_queue.enabled:
+            queue_path = HYBRO_DIR / "data" / "publish_queue.db"
+            self.relay.init_queue(queue_path, self.config.publish_queue)
+            stats = await self.relay.get_queue_stats()
+            if stats["total"] > 0:
+                logger.info(
+                    "Found %d queued events from previous session — "
+                    "triggering immediate drain",
+                    stats["total"],
+                )
+                # Drain immediately rather than waiting for first interval
+                asyncio.create_task(
+                    self.relay.drain_queued_events(
+                        batch_size=self.config.publish_queue.drain_batch_size
+                    )
+                )
 
         # Register with relay
         await self.relay.register()
@@ -103,6 +123,12 @@ class HubDaemon:
         resync_task = asyncio.create_task(self._resync_loop())
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
+        background_tasks = [health_task, resync_task, heartbeat_task]
+
+        if self.config.publish_queue.enabled:
+            self._drain_task = asyncio.create_task(self._queue_drain_loop())
+            background_tasks.append(self._drain_task)
+
         try:
             async for event in self.relay.subscribe():
                 if self._shutdown_event.is_set():
@@ -116,13 +142,9 @@ class HubDaemon:
                 except Exception:
                     logger.exception("Failed to handle relay event")
         finally:
-            health_task.cancel()
-            resync_task.cancel()
-            heartbeat_task.cancel()
-            await asyncio.gather(
-                health_task, resync_task, heartbeat_task,
-                return_exceptions=True,
-            )
+            for t in background_tasks:
+                t.cancel()
+            await asyncio.gather(*background_tasks, return_exceptions=True)
 
     async def _handle_event(self, event: dict[str, Any]) -> None:
         """Handle a relay event based on its type."""
@@ -347,6 +369,23 @@ class HubDaemon:
 
     # ──── Background tasks ────
 
+    async def _queue_drain_loop(self) -> None:
+        """Periodically retry events that failed immediate delivery."""
+        qcfg = self.config.publish_queue
+        while not self._shutdown_event.is_set():
+            await asyncio.sleep(qcfg.drain_interval)
+            try:
+                await self.relay.drain_queued_events(batch_size=qcfg.drain_batch_size)
+                if self.relay._queue:
+                    expired = await self.relay._queue.cleanup_expired()
+                    by_size = await self.relay._queue.cleanup_by_size()
+                    if expired:
+                        logger.info("Queue: cleaned up %d expired events", expired)
+                    if by_size:
+                        logger.warning("Queue: cleaned up %d events (size limit)", by_size)
+            except Exception:
+                logger.exception("Queue drain error")
+
     async def _health_check_loop(self) -> None:
         while not self._shutdown_event.is_set():
             await asyncio.sleep(HEALTH_CHECK_INTERVAL)
@@ -393,6 +432,16 @@ class HubDaemon:
 
     async def _shutdown(self) -> None:
         logger.info("Shutting down hub daemon...")
+
+        if self.config.publish_queue.enabled:
+            stats = await self.relay.get_queue_stats()
+            if stats["total"] > 0:
+                logger.info(
+                    "Shutdown with %d events still queued — will retry on next start",
+                    stats["total"],
+                )
+            self.relay.close_queue()
+
         await self.relay.close()
         await self.registry.close()
         await self.dispatcher.close()

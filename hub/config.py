@@ -28,6 +28,21 @@ class LocalAgentConfig(BaseModel):
     url: str
 
 
+class PublishQueueConfig(BaseModel):
+    """Configuration for the disk-backed publish queue."""
+
+    enabled: bool = True
+    max_size_mb: int = 50           # Max disk usage in MB
+    ttl_hours: int = 24             # Events older than this are dropped
+    drain_interval: int = 30        # Seconds between background drain cycles
+    drain_batch_size: int = 20      # Max events processed per drain cycle
+
+    # Per-category retry limits (power-user tuning)
+    max_retries_critical: int = 20  # agent_response, agent_error, processing_status
+    max_retries_normal: int = 5     # task_submitted, artifact_update, task_status
+    max_retries_streaming: int = 3  # agent_token (stale quickly, cheap to drop)
+
+
 class HubConfig(BaseModel):
     """Hub daemon configuration."""
 
@@ -46,6 +61,8 @@ class HubConfig(BaseModel):
     privacy_sensitive_patterns: list[str] = Field(default_factory=list)
 
     heartbeat_interval: int = 30
+
+    publish_queue: PublishQueueConfig = Field(default_factory=PublishQueueConfig)
 
 
 def load_config(
