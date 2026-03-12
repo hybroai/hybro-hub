@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hybro-hub"
-version = "0.1.1"
+version = "0.1.2"
 description = "Python SDK for the Hybro Gateway API — discover and communicate with cloud A2A agents."
 readme = "README.md"
 license = "MIT"
