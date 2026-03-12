@@ -8,8 +8,8 @@ from collections.abc import AsyncIterator
 import httpx
 from httpx_sse import aconnect_sse
 
-from hybro_sdk.errors import raise_for_status
-from hybro_sdk.models import StreamEvent
+from hybro_hub.errors import raise_for_status
+from hybro_hub.models import StreamEvent
 
 
 async def iter_sse_events(

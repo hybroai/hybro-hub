@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "hybro-sdk"
-version = "0.1.0"
+name = "hybro-hub"
+version = "0.1.1"
 description = "Python SDK for the Hybro Gateway API — discover and communicate with cloud A2A agents."
 readme = "README.md"
 license = "MIT"
@@ -47,7 +47,7 @@ Homepage = "https://hybro.ai"
 Repository = "https://github.com/hybro-ai/hybro-hub"
 
 [tool.hatch.build.targets.wheel]
-packages = ["hybro_sdk", "hub"]
+packages = ["hybro_hub", "hub"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

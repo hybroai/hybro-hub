@@ -6,8 +6,8 @@ import httpx
 import pytest
 import respx
 
-from hybro_sdk._sse import iter_sse_events
-from hybro_sdk.models import StreamEvent
+from hybro_hub._sse import iter_sse_events
+from hybro_hub.models import StreamEvent
 
 BASE = "https://api.hybro.ai/api/v1"
 

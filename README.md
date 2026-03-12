@@ -2,7 +2,7 @@
 
 **Your local AI agents, accessible from anywhere. Your data stays on your machine.**
 
-[![PyPI](https://img.shields.io/pypi/v/hybro-sdk)](https://pypi.org/project/hybro-sdk/)
+[![PyPI](https://img.shields.io/pypi/v/hybro-hub)](https://pypi.org/project/hybro-hub/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 
@@ -41,12 +41,12 @@ pip install hybro-hub
 
 ### 2. Get your API key
 
-Go to [hybro.ai/settings](https://hybro.ai) → API Keys → **Generate New Key**. Copy the key (starts with `hba_`).
+Go to [hybro.ai/d/discovery-api-keys](https://hybro.ai/d/discovery-api-keys) → API Keys → **Generate New Key**. Copy the key (starts with `hybro_`).
 
 ### 3. Start the hub
 
 ```bash
-hybro-hub start --api-key hba_your_key_here
+hybro-hub start --api-key hybro_your_key_here
 ```
 
 ### 4. Launch a local agent
@@ -108,7 +108,7 @@ Add it to a room, send a message. The response streams back with a **🏠 Local*
 
 - **Outbound-only** — the hub initiates all connections. No inbound ports, no firewall changes, works behind NAT.
 - **Portal-first** — you always use hybro.ai. No localhost URLs, no mode switching. Local agents just appear as more agents in the same portal.
-- **A2A protocol** — local and cloud agents speak the same [Agent-to-Agent protocol](https://github.com/google/A2A). Any A2A-compatible agent works.
+- **A2A protocol** — local and cloud agents speak the same [Agent-to-Agent protocol](https://github.com/a2aproject/A2A). Any A2A-compatible agent works.
 - **Graceful degradation** — if the hub is offline, cloud agents still work. Local agents show as "offline" and messages queue until the hub reconnects.
 
 ---
@@ -145,7 +145,7 @@ The hub scans outbound messages for sensitive content before they reach cloud ag
 Start the hub daemon. Connects to hybro.ai, discovers local agents, and syncs them to the cloud.
 
 ```bash
-hybro-hub start --api-key hba_...
+hybro-hub start --api-key hybro_...
 ```
 
 The API key is saved to `~/.hybro/config.yaml` after first use — subsequent starts don't need it.
@@ -177,7 +177,7 @@ hybro-hub agent start ollama
 hybro-hub agent start ollama --model mistral:7b --port 10020 --system-prompt "You are a helpful assistant"
 ```
 
-**OpenClaw** — AI coding agent (requires [OpenClaw](https://openclaw.com)):
+**OpenClaw** — AI coding agent (requires [OpenClaw](https://openclaw.ai)):
 
 ```bash
 hybro-hub agent start openclaw
@@ -192,22 +192,22 @@ hybro-hub agent start n8n --webhook-url http://localhost:5678/webhook/my-agent
 
 **Common options:**
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--port` | `10010` | Port for the A2A agent server |
-| `--name` | auto | Agent display name |
-| `--timeout` | varies | Request timeout in seconds |
+| Option      | Default | Description                   |
+| ----------- | ------- | ----------------------------- |
+| `--port`    | `10010` | Port for the A2A agent server |
+| `--name`    | auto    | Agent display name            |
+| `--timeout` | varies  | Request timeout in seconds    |
 
 **Adapter-specific options:**
 
-| Option | Adapter | Description |
-|--------|---------|-------------|
-| `--model` | ollama | Ollama model (default: `llama3.2:8b`) |
-| `--system-prompt` | ollama | Custom system prompt |
-| `--thinking` | openclaw | Thinking level: off/minimal/low/medium/high/xhigh |
-| `--agent-id` | openclaw | OpenClaw agent ID |
-| `--openclaw-path` | openclaw | Path to the openclaw binary |
-| `--webhook-url` | n8n | Webhook URL (required) |
+| Option            | Adapter  | Description                                       |
+| ----------------- | -------- | ------------------------------------------------- |
+| `--model`         | ollama   | Ollama model (default: `llama3.2:8b`)             |
+| `--system-prompt` | ollama   | Custom system prompt                              |
+| `--thinking`      | openclaw | Thinking level: off/minimal/low/medium/high/xhigh |
+| `--agent-id`      | openclaw | OpenClaw agent ID                                 |
+| `--openclaw-path` | openclaw | Path to the openclaw binary                       |
+| `--webhook-url`   | n8n      | Webhook URL (required)                            |
 
 > Requires the `a2a-adapter` package: `pip install a2a-adapter`
 
@@ -220,17 +220,17 @@ The hub reads from `~/.hybro/config.yaml`. A full example:
 ```yaml
 # Cloud connection
 cloud:
-  api_key: "hba_..."
+  api_key: "hybro_..."
   gateway_url: "https://api.hybro.ai"
 
 # Agent discovery
 agents:
-  auto_discover: true           # Probe localhost ports for A2A agents
-  auto_discover_exclude_ports:  # Skip non-agent ports
-    - 22    # SSH
-    - 3306  # MySQL
-    - 5432  # PostgreSQL
-  local:                        # Always-registered agents
+  auto_discover: true # Probe localhost ports for A2A agents
+  auto_discover_exclude_ports: # Skip non-agent ports
+    - 22 # SSH
+    - 3306 # MySQL
+    - 5432 # PostgreSQL
+  local: # Always-registered agents
     - name: "My Custom Agent"
       url: "http://localhost:9001"
 
@@ -247,7 +247,7 @@ heartbeat_interval: 30
 You can also set the API key and gateway URL via environment variables:
 
 ```bash
-export HYBRO_API_KEY="hba_..."
+export HYBRO_API_KEY="hybro_..."
 export HYBRO_GATEWAY_URL="https://api.hybro.ai"
 ```
 
@@ -255,11 +255,11 @@ export HYBRO_GATEWAY_URL="https://api.hybro.ai"
 
 ## Bring Your Own Agent
 
-Any agent that speaks the [A2A protocol](https://github.com/google/A2A) works with Hybro Hub.
+Any agent that speaks the [A2A protocol](https://github.com/a2aproject/A2A) works with Hybro Hub.
 
 ### Auto-discovery
 
-With `auto_discover: true` (the default), the hub automatically finds A2A agents running on localhost by probing listening TCP ports for agent cards at `/.well-known/agent-card.json`. Just start your agent — the hub will find it.
+With `auto_discover: true` (the default), the hub automatically finds A2A agents running on localhost by probing listening TCP ports for agent cards at `/.well-known/agent.json` or `/.well-known/agent-card.json`. Just start your agent — the hub will find it.
 
 ### Manual registration
 
@@ -271,12 +271,12 @@ agents:
     - name: "My Research Agent"
       url: "http://localhost:8001"
     - name: "Team Agent"
-      url: "http://192.168.1.50:8080"  # LAN agents work too
+      url: "http://192.168.1.50:8080" # LAN agents work too
 ```
 
 ### Building an A2A agent
 
-Use the [a2a-python SDK](https://github.com/google/A2A/tree/main/sdks/python) to build a compatible agent:
+Use the [a2a-python SDK](https://github.com/a2aproject/A2A/tree/main/sdks/python) to build a compatible agent:
 
 ```python
 from a2a.server.apps import A2AStarletteApplication
@@ -294,16 +294,16 @@ The hub discovers it automatically and syncs it to hybro.ai.
 
 ## Hybro SDK (Python Client)
 
-The repo also ships `hybro_sdk` — a Python client for calling cloud agents programmatically via the Hybro Gateway API. Use this when you want to integrate cloud agents into your own code, outside of the hub.
+The repo also ships `hybro_hub` — a Python client for calling cloud agents programmatically via the Hybro Gateway API. Use this when you want to integrate cloud agents into your own code, outside of the hub.
 
 ### Quickstart
 
 ```python
 import asyncio
-from hybro_sdk import HybroGateway
+from hybro_hub import HybroGateway
 
 async def main():
-    async with HybroGateway(api_key="hba_...") as gw:
+    async with HybroGateway(api_key="hybro_...") as gw:
         agents = await gw.discover("legal contract review")
         async for event in gw.stream(agents[0].agent_id, "Review this NDA"):
             print(event.data)
@@ -313,17 +313,17 @@ asyncio.run(main())
 
 ### Methods
 
-| Method | Description |
-|--------|-------------|
-| `discover(query, *, limit=None)` | Search for agents by natural language. Returns `list[AgentInfo]`. |
-| `send(agent_id, text, *, context_id=None)` | Send a message, get the full response. Returns `dict`. |
-| `stream(agent_id, text, *, context_id=None)` | Stream a response via SSE. Yields `StreamEvent`. |
-| `get_card(agent_id)` | Fetch an agent's A2A card. Returns `dict`. |
+| Method                                       | Description                                                       |
+| -------------------------------------------- | ----------------------------------------------------------------- |
+| `discover(query, *, limit=None)`             | Search for agents by natural language. Returns `list[AgentInfo]`. |
+| `send(agent_id, text, *, context_id=None)`   | Send a message, get the full response. Returns `dict`.            |
+| `stream(agent_id, text, *, context_id=None)` | Stream a response via SSE. Yields `StreamEvent`.                  |
+| `get_card(agent_id)`                         | Fetch an agent's A2A card. Returns `dict`.                        |
 
 ### Error handling
 
 ```python
-from hybro_sdk import AuthError, RateLimitError, AgentNotFoundError
+from hybro_hub import AuthError, RateLimitError, AgentNotFoundError
 
 try:
     result = await gw.send(agent_id, "Hello")
@@ -335,14 +335,14 @@ except RateLimitError as e:
     print(f"Rate limited — retry after {e.retry_after}s")
 ```
 
-| Exception | Status | Cause |
-|-----------|--------|-------|
-| `AuthError` | 401 | Invalid API key |
-| `AccessDeniedError` | 403 | No access to agent |
-| `AgentNotFoundError` | 404 | Agent not found / inactive |
-| `RateLimitError` | 429 | Rate limit exceeded |
-| `AgentCommunicationError` | 502 | Upstream agent error |
-| `GatewayError` | any | Base class |
+| Exception                 | Status | Cause                      |
+| ------------------------- | ------ | -------------------------- |
+| `AuthError`               | 401    | Invalid API key            |
+| `AccessDeniedError`       | 403    | No access to agent         |
+| `AgentNotFoundError`      | 404    | Agent not found / inactive |
+| `RateLimitError`          | 429    | Rate limit exceeded        |
+| `AgentCommunicationError` | 502    | Upstream agent error       |
+| `GatewayError`            | any    | Base class                 |
 
 ---
 

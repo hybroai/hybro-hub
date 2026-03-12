@@ -3,7 +3,7 @@
 
 # Cloud connection
 cloud:
-  api_key: "hba_..."                    # Your Hybro API key (or set HYBRO_API_KEY env var)
+  api_key: "hybro_..."                    # Your Hybro API key (or set HYBRO_API_KEY env var)
   gateway_url: "https://api.hybro.ai"   # Cloud gateway URL
 
 # Local agent discovery

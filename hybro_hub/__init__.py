@@ -1,8 +1,8 @@
-"""Hybro SDK — Python client for the Hybro Gateway API."""
+"""Hybro Hub — Python client for the Hybro Gateway API."""
 
-from hybro_sdk.client import HybroGateway
-from hybro_sdk.models import AgentInfo, StreamEvent
-from hybro_sdk.errors import (
+from hybro_hub.client import HybroGateway
+from hybro_hub.models import AgentInfo, StreamEvent
+from hybro_hub.errors import (
     AccessDeniedError,
     AgentCommunicationError,
     AgentNotFoundError,

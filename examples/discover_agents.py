@@ -1,7 +1,7 @@
 """Discover agents matching a query."""
 
 import asyncio
-from hybro_sdk import HybroGateway
+from hybro_hub import HybroGateway
 
 API_KEY = "hybro_YETntgHIYpLrmHeOzWuJjt56UB9nlC_a"
 

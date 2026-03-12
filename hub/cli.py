@@ -49,7 +49,7 @@ def start(ctx: click.Context, api_key: str | None) -> None:
     if not config.api_key:
         click.echo(
             "Error: No API key configured.\n"
-            "Run: hybro-hub start --api-key hba_...\n"
+            "Run: hybro-hub start --api-key hybro_...\n"
             "Or set HYBRO_API_KEY environment variable.",
             err=True,
         )

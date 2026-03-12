@@ -6,14 +6,14 @@ import httpx
 import pytest
 import respx
 
-from hybro_sdk.client import HybroGateway
-from hybro_sdk.errors import (
+from hybro_hub.client import HybroGateway
+from hybro_hub.errors import (
     AuthError,
     AgentNotFoundError,
     RateLimitError,
     GatewayError,
 )
-from hybro_sdk.models import AgentInfo
+from hybro_hub.models import AgentInfo
 
 BASE = "https://api.hybro.ai/api/v1"
 
