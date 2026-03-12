@@ -249,7 +249,7 @@ class RelayClient:
 
             try:
                 event = _json.loads(event_json)
-            except (json.JSONDecodeError, ValueError, TypeError):
+            except (ValueError, TypeError):
                 logger.error("Corrupt event %d in queue — dropping", event_id)
                 await self._queue.delete(event_id)
                 continue

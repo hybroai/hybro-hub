@@ -53,6 +53,7 @@ class HubDaemon:
         self._shutdown_event = asyncio.Event()
         self._last_sync_payload: list[dict] | None = None
         self._drain_task: asyncio.Task | None = None
+        self._startup_drain_task: asyncio.Task | None = None
 
     async def run(self) -> None:
         """Main entry point — run the hub daemon."""
@@ -89,7 +90,7 @@ class HubDaemon:
                     stats["total"],
                 )
                 # Drain immediately rather than waiting for first interval
-                asyncio.create_task(
+                self._startup_drain_task = asyncio.create_task(
                     self.relay.drain_queued_events(
                         batch_size=self.config.publish_queue.drain_batch_size
                     )
@@ -255,7 +256,7 @@ class HubDaemon:
             async with _httpx.AsyncClient(timeout=10) as client:
                 cancel_body = {
                     "jsonrpc": "2.0",
-                    "id": str(__import__("uuid").uuid4().hex),
+                    "id": uuid4().hex,
                     "method": "tasks/cancel",
                     "params": {"id": task_id},
                 }
@@ -306,10 +307,9 @@ class HubDaemon:
         }
         if task_id:
             reply_message["taskId"] = task_id
+            reply_message["referenceTaskIds"] = [task_id]
         if context_id:
             reply_message["contextId"] = context_id
-        if task_id:
-            reply_message["referenceTaskIds"] = [task_id]
 
         logger.info(
             "Dispatching HITL reply to %s (room=%s, msg=%s)",
@@ -432,6 +432,14 @@ class HubDaemon:
 
     async def _shutdown(self) -> None:
         logger.info("Shutting down hub daemon...")
+
+        # Cancel the startup drain task if it's still running
+        if self._startup_drain_task and not self._startup_drain_task.done():
+            self._startup_drain_task.cancel()
+            try:
+                await self._startup_drain_task
+            except asyncio.CancelledError:
+                pass
 
         if self.config.publish_queue.enabled:
             stats = await self.relay.get_queue_stats()
