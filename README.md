@@ -1,6 +1,6 @@
 # Hybro Hub
 
-**Your local AI agents, accessible from anywhere. Your data stays on your machine.**
+**Your local & remote AI agents — private, powerful, unified.**
 
 [![PyPI](https://img.shields.io/pypi/v/hybro-hub)](https://pypi.org/project/hybro-hub/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
@@ -276,7 +276,7 @@ agents:
 
 ### Building an A2A agent
 
-Use the [a2a-python SDK](https://github.com/a2aproject/A2A/tree/main/sdks/python) to build a compatible agent:
+Use the [a2a-python SDK](https://github.com/a2aproject/a2a-python) to build a compatible agent:
 
 ```python
 from a2a.server.apps import A2AStarletteApplication
