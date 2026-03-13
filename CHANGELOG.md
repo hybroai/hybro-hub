@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - GitHub Actions workflow for automated PyPI publishing via trusted publishers
 
-## [0.1.2] - 2026-03-08
+## [0.1.2] - 2026-03-12
 
 ### Added
 
