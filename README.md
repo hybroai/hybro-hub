@@ -54,7 +54,7 @@ hybro-hub start --api-key hybro_your_key_here
 Start a local LLM as an A2A agent (requires [Ollama](https://ollama.com) installed):
 
 ```bash
-hybro-hub agent start ollama --model llama3.2:8b
+hybro-hub agent start ollama --model llama3.2
 ```
 
 You'll see:
@@ -62,7 +62,7 @@ You'll see:
 ```
 🔗 Connected to hybro.ai
 📡 Found 1 local agent:
-   • My Ollama Chat (llama3.2:8b) — localhost:10010
+   • My Ollama Chat (llama3.2) — localhost:10010
 Agents synced to hybro.ai. Open hybro.ai to start chatting.
 ```
 
@@ -73,7 +73,7 @@ Refresh [hybro.ai](https://hybro.ai). Your local agent appears alongside cloud a
 ```
   ☁️  Legal Contract Reviewer          (cloud)
   ☁️  Code Review Pro                  (cloud)
-  🏠  My Ollama Chat (llama3.2:8b)     (local · online)
+  🏠  My Ollama Chat (llama3.2)     (local · online)
 ```
 
 Add it to a room, send a message. The response streams back with a **🏠 Local** badge — your data never left your machine.
@@ -202,7 +202,7 @@ hybro-hub agent start n8n --webhook-url http://localhost:5678/webhook/my-agent
 
 | Option            | Adapter  | Description                                       |
 | ----------------- | -------- | ------------------------------------------------- |
-| `--model`         | ollama   | Ollama model (default: `llama3.2:8b`)             |
+| `--model`         | ollama   | Ollama model (default: `llama3.2`)             |
 | `--system-prompt` | ollama   | Custom system prompt                              |
 | `--thinking`      | openclaw | Thinking level: off/minimal/low/medium/high/xhigh |
 | `--agent-id`      | openclaw | OpenClaw agent ID                                 |

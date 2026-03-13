@@ -7,6 +7,7 @@ import logging
 import sys
 
 import click
+import httpx
 
 from .config import load_config, save_api_key
 from .main import HubDaemon
@@ -139,11 +140,57 @@ _CLI_ADAPTERS = {
 }
 
 
+def _validate_ollama_model(model: str, base_url: str = "http://localhost:11434") -> None:
+    """Check if the specified model exists in Ollama.
+    
+    Raises click.ClickException if Ollama is not running or model not found.
+    """
+    try:
+        resp = httpx.get(f"{base_url}/api/tags", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        available_models = [m.get("name", "") for m in data.get("models", [])]
+        
+        # Check exact match or match without tag (e.g., "llama3.2" matches "llama3.2:latest")
+        if ":" in model:
+            # User specified exact tag - require exact match
+            found = model in available_models
+        else:
+            # User specified base name only - match any variant
+            found = any(
+                m == model or m.startswith(f"{model}:")
+                for m in available_models
+            )
+        
+        if not found:
+            if available_models:
+                models_list = ", ".join(available_models[:5])
+                if len(available_models) > 5:
+                    models_list += f", ... ({len(available_models)} total)"
+                raise click.ClickException(
+                    f"Model '{model}' not found in Ollama.\n"
+                    f"Available models: {models_list}\n"
+                    f"Pull it with: ollama pull {model}"
+                )
+            else:
+                raise click.ClickException(
+                    f"Model '{model}' not found. No models available in Ollama.\n"
+                    f"Pull it with: ollama pull {model}"
+                )
+    except httpx.ConnectError:
+        raise click.ClickException(
+            f"Cannot connect to Ollama at {base_url}.\n"
+            "Is Ollama running? Start it with: ollama serve"
+        )
+    except httpx.HTTPStatusError as e:
+        raise click.ClickException(f"Ollama API error: {e.response.status_code}")
+
+
 @agent.command("start")
 @click.argument("adapter_type", type=click.Choice(sorted(_CLI_ADAPTERS), case_sensitive=False))
 @click.option("--port", default=10010, type=int, help="Port for the A2A server.")
 @click.option("--name", "agent_name", default=None, help="Agent display name.")
-@click.option("--model", default=None, help="[ollama] Model name (default: llama3.2:8b).")
+@click.option("--model", default=None, help="[ollama] Model name (default: llama3.2).")
 @click.option("--system-prompt", default=None, help="[ollama] System prompt.")
 @click.option("--thinking", default=None, help="[openclaw] Thinking level (off/minimal/low/medium/high/xhigh).")
 @click.option("--agent-id", default=None, help="[openclaw] OpenClaw agent ID.")
@@ -187,7 +234,8 @@ def agent_start(
     config: dict = {"adapter": adapter_type}
 
     if adapter_type == "ollama":
-        config["model"] = model or "llama3.2:8b"
+        config["model"] = model or "llama3.2"
+        _validate_ollama_model(config["model"])
         config["name"] = agent_name or f"Ollama ({config['model']})"
         config["description"] = f"Local LLM via Ollama ({config['model']})"
         if system_prompt:
