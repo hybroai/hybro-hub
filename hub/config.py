@@ -40,7 +40,7 @@ class PublishQueueConfig(BaseModel):
     # Per-category retry limits (power-user tuning)
     max_retries_critical: int = 20  # agent_response, agent_error, processing_status
     max_retries_normal: int = 5     # task_submitted, artifact_update, task_status
-    max_retries_streaming: int = 3  # agent_token (stale quickly, cheap to drop)
+    max_retries_streaming: int = 3  # Unused: retained for config-file backward compat
 
 
 class HubConfig(BaseModel):

@@ -26,7 +26,6 @@ def qcfg():
         drain_batch_size=20,
         max_retries_critical=5,
         max_retries_normal=3,
-        max_retries_streaming=2,
     )
 
 
@@ -66,7 +65,7 @@ class TestPublishQueueEnqueue:
     @pytest.mark.asyncio
     async def test_enqueue_second_row_increments_id(self, queue):
         await queue.enqueue("room-1", "msg-1", {"type": "agent_response"})
-        rid2 = await queue.enqueue("room-1", "msg-2", {"type": "agent_token"})
+        rid2 = await queue.enqueue("room-1", "msg-2", {"type": "task_submitted"})
         assert rid2 == 2
 
     @pytest.mark.asyncio
@@ -78,10 +77,10 @@ class TestPublishQueueEnqueue:
             assert max_retries == qcfg.max_retries_critical
 
     @pytest.mark.asyncio
-    async def test_streaming_events_get_streaming_max_retries(self, queue, qcfg):
-        await queue.enqueue("room", "msg", {"type": "agent_token"})
+    async def test_artifact_update_gets_normal_max_retries(self, queue, qcfg):
+        await queue.enqueue("room", "msg", {"type": "artifact_update"})
         events = await queue.get_ready_events(time.time() + 1)
-        assert events[0][5] == qcfg.max_retries_streaming
+        assert events[0][5] == qcfg.max_retries_normal
 
     @pytest.mark.asyncio
     async def test_normal_events_get_normal_max_retries(self, queue, qcfg):
@@ -109,7 +108,7 @@ class TestPublishQueueGetReadyEvents:
 
     @pytest.mark.asyncio
     async def test_critical_events_returned_before_normal(self, queue):
-        await queue.enqueue("room", "msg-normal", {"type": "agent_token"}, priority=0)
+        await queue.enqueue("room", "msg-normal", {"type": "task_submitted"}, priority=0)
         await queue.enqueue("room", "msg-critical", {"type": "agent_response"}, priority=1)
         events = await queue.get_ready_events(time.time() + 1)
         # First event should be the critical one (priority=1)
@@ -118,7 +117,7 @@ class TestPublishQueueGetReadyEvents:
     @pytest.mark.asyncio
     async def test_respects_limit(self, queue):
         for i in range(5):
-            await queue.enqueue("room", f"msg-{i}", {"type": "agent_token"})
+            await queue.enqueue("room", f"msg-{i}", {"type": "task_submitted"})
         events = await queue.get_ready_events(time.time() + 1, limit=3)
         assert len(events) == 3
 
@@ -151,7 +150,7 @@ class TestPublishQueueGetStats:
     @pytest.mark.asyncio
     async def test_stats_counts(self, queue):
         await queue.enqueue("room", "m1", {"type": "agent_response"}, priority=1)
-        await queue.enqueue("room", "m2", {"type": "agent_token"}, priority=0)
+        await queue.enqueue("room", "m2", {"type": "task_submitted"}, priority=0)
         stats = await queue.get_stats()
         assert stats["total"] == 2
         assert stats["critical"] == 1
@@ -200,7 +199,7 @@ class TestPublishQueueCleanupBySize:
         q.open()
         try:
             for i in range(10):
-                await q.enqueue("room", f"msg-{i}", {"type": "agent_token"})
+                await q.enqueue("room", f"msg-{i}", {"type": "task_submitted"})
             removed = await q.cleanup_by_size()
             assert removed >= 1
         finally:

@@ -44,7 +44,6 @@ CREATE INDEX IF NOT EXISTS idx_agent_message
 """
 
 CRITICAL_EVENTS = frozenset({"agent_response", "agent_error", "processing_status"})
-STREAMING_EVENTS = frozenset({"agent_token"})
 
 # Row tuple returned by get_ready_events:
 #   (id, room_id, agent_message_id, event_json, retry_count, max_retries)
@@ -281,6 +280,4 @@ class PublishQueue:
     def _max_retries_for(self, event_type: str) -> int:
         if event_type in CRITICAL_EVENTS:
             return self._config.max_retries_critical
-        if event_type in STREAMING_EVENTS:
-            return self._config.max_retries_streaming
         return self._config.max_retries_normal

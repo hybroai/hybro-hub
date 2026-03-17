@@ -1,6 +1,8 @@
 """Tests for hub.dispatcher."""
 
 import json
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -266,3 +268,157 @@ class TestCollectParts:
         text, non_text = Dispatcher._collect_parts([])
         assert text == ""
         assert non_text == []
+
+
+# ──── Helpers for streaming tests ────
+
+
+@dataclass
+class FakeSSE:
+    data: str
+
+
+class FakeEventSource:
+    def __init__(self, events: list[dict]):
+        self._events = events
+
+    async def aiter_sse(self):
+        for ev in self._events:
+            yield FakeSSE(data=json.dumps(ev))
+
+
+@asynccontextmanager
+async def _fake_aconnect_sse(client, method, url, **kwargs):
+    events = client._canned_events
+    yield FakeEventSource(events)
+
+
+class TestDispatchStreaming:
+    """Tests for streaming dispatch — kind='message' emits artifact_update."""
+
+    @pytest.mark.asyncio
+    async def test_message_kind_emits_artifact_update(self, streaming_agent):
+        """A2A kind='message' events produce artifact_update DispatchEvents."""
+        canned = [
+            {"result": {"kind": "task", "id": "t-1", "contextId": "ctx-1"}},
+            {"result": {"kind": "message", "parts": [{"text": "Hello "}]}},
+            {"result": {"kind": "message", "parts": [{"text": "world"}]}},
+            {"result": {"kind": "status-update", "status": {"state": "completed"}, "final": True}},
+        ]
+
+        dispatcher = Dispatcher()
+        mock_client = AsyncMock()
+        mock_client._canned_events = canned
+        dispatcher._client = mock_client
+
+        import hub.dispatcher as dispatcher_mod
+        original = dispatcher_mod.aconnect_sse
+        dispatcher_mod.aconnect_sse = _fake_aconnect_sse
+        try:
+            batches = []
+            async for batch in dispatcher.dispatch(
+                agent=streaming_agent,
+                message_dict=SAMPLE_MESSAGE,
+                agent_message_id="am-stream-001",
+                user_message_id="um-001",
+            ):
+                batches.append(batch)
+        finally:
+            dispatcher_mod.aconnect_sse = original
+
+        streaming_events = [ev for b in batches[:-1] for ev in b]
+        terminal_events = batches[-1]
+
+        artifact_updates = [e for e in streaming_events if e["type"] == "artifact_update"]
+        assert len(artifact_updates) == 2
+
+        first = artifact_updates[0]
+        assert first["data"]["append"] is True
+        assert first["data"]["last_chunk"] is False
+        assert first["data"]["text"] == "Hello "
+        assert first["data"]["artifact"]["artifactId"] == "am-stream-001-stream"
+        assert first["data"]["artifact"]["parts"] == [{"kind": "text", "text": "Hello "}]
+
+        second = artifact_updates[1]
+        assert second["data"]["text"] == "world"
+        assert second["data"]["artifact"]["parts"] == [{"kind": "text", "text": "world"}]
+
+        response = next(e for e in terminal_events if e["type"] == "agent_response")
+        assert response["data"]["content"] == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_native_artifact_update_unchanged(self, streaming_agent):
+        """A2A kind='artifact-update' events still produce artifact_update with raw data."""
+        canned = [
+            {"result": {"kind": "task", "id": "t-2", "contextId": "ctx-2"}},
+            {"result": {
+                "kind": "artifact-update",
+                "artifact": {"artifactId": "art-1", "parts": [{"text": "native chunk"}]},
+                "append": True,
+                "lastChunk": False,
+            }},
+            {"result": {"kind": "status-update", "status": {"state": "completed"}, "final": True}},
+        ]
+
+        dispatcher = Dispatcher()
+        mock_client = AsyncMock()
+        mock_client._canned_events = canned
+        dispatcher._client = mock_client
+
+        import hub.dispatcher as dispatcher_mod
+        original = dispatcher_mod.aconnect_sse
+        dispatcher_mod.aconnect_sse = _fake_aconnect_sse
+        try:
+            batches = []
+            async for batch in dispatcher.dispatch(
+                agent=streaming_agent,
+                message_dict=SAMPLE_MESSAGE,
+                agent_message_id="am-stream-002",
+                user_message_id="um-002",
+            ):
+                batches.append(batch)
+        finally:
+            dispatcher_mod.aconnect_sse = original
+
+        streaming_events = [ev for b in batches[:-1] for ev in b]
+        artifact_updates = [e for e in streaming_events if e["type"] == "artifact_update"]
+        assert len(artifact_updates) == 1
+
+        ev = artifact_updates[0]
+        assert ev["data"]["append"] is True
+        assert ev["data"]["last_chunk"] is False
+        assert ev["data"]["text"] == "native chunk"
+        assert ev["data"]["raw"]["artifact"]["artifactId"] == "art-1"
+
+    @pytest.mark.asyncio
+    async def test_empty_message_skipped(self, streaming_agent):
+        """A2A kind='message' events with no text and no parts are not emitted."""
+        canned = [
+            {"result": {"kind": "task", "id": "t-3"}},
+            {"result": {"kind": "message", "parts": []}},
+            {"result": {"kind": "status-update", "status": {"state": "completed"}, "final": True}},
+        ]
+
+        dispatcher = Dispatcher()
+        mock_client = AsyncMock()
+        mock_client._canned_events = canned
+        dispatcher._client = mock_client
+
+        import hub.dispatcher as dispatcher_mod
+        original = dispatcher_mod.aconnect_sse
+        dispatcher_mod.aconnect_sse = _fake_aconnect_sse
+        try:
+            batches = []
+            async for batch in dispatcher.dispatch(
+                agent=streaming_agent,
+                message_dict=SAMPLE_MESSAGE,
+                agent_message_id="am-stream-003",
+                user_message_id="um-003",
+            ):
+                batches.append(batch)
+        finally:
+            dispatcher_mod.aconnect_sse = original
+
+        streaming_events = [ev for b in batches[:-1] for ev in b]
+        artifact_updates = [e for e in streaming_events if e["type"] == "artifact_update"]
+        assert len(artifact_updates) == 0

@@ -97,11 +97,9 @@ class Dispatcher:
             if agent.agent_card.get("capabilities", {}).get("streaming"):
                 async for event in self._dispatch_streaming(agent, message_dict, agent_message_id):
                     ev_dict = event.to_publish_dict()
-                    if event.type in ("agent_token", "artifact_update", "task_status"):
+                    if event.type in ("artifact_update", "task_status"):
                         yield [ev_dict]
-                    if event.type == "agent_token":
-                        result.text += event.data.get("token", "")
-                    elif event.type == "artifact_update":
+                    if event.type == "artifact_update":
                         result.artifact_text += event.data.get("text", "")
                     elif event.type == "task_status":
                         result.task_state = event.data.get("state")
@@ -326,10 +324,24 @@ class Dispatcher:
                     text = self._extract_message_text(inner)
                     raw_parts = self._collect_non_text_parts_from_message(inner)
                     if text or raw_parts:
+                        artifact_parts = []
+                        if text:
+                            artifact_parts.append({"kind": "text", "text": text})
+                        artifact_parts.extend(raw_parts)
                         yield DispatchEvent(
-                            type="agent_token",
+                            type="artifact_update",
                             agent_message_id=agent_message_id,
-                            data={"token": text, "parts": raw_parts},
+                            data={
+                                "raw": inner,
+                                "text": text,
+                                "parts": raw_parts,
+                                "append": True,
+                                "last_chunk": False,
+                                "artifact": {
+                                    "artifactId": f"{agent_message_id}-stream",
+                                    "parts": artifact_parts,
+                                },
+                            },
                         )
                 else:
                     if kind:
