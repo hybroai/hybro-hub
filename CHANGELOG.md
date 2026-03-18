@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] - 2026-03-17
+
+### Changed
+
+- Make `a2a-adapter` a core dependency (no longer requires separate install)
+- License changed from MIT to Apache 2.0
+- Emit `artifact_update` instead of `agent_token` for streaming
+
+### Fixed
+
+- Prevent resource leaks in dispatcher, registry, relay, and queue
+
 ## [0.1.4] - 2026-03-13
 
 ### Fixed
