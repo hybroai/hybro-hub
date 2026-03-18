@@ -29,10 +29,10 @@ dependencies = [
     "click>=8.0",
     "a2a-sdk>=0.3,<1",
     "psutil>=5.9",
+    "a2a-adapter",
 ]
 
 [project.optional-dependencies]
-ollama = ["a2a-adapter"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
