@@ -85,8 +85,13 @@ def status(ctx: click.Context) -> None:
                 return
             for h in hubs:
                 online = "Online" if h.get("is_online") else "Offline"
-                agents = h.get("agent_count", 0)
-                click.echo(f"  Hub {h['hub_id'][:12]}... — {online} — {agents} agent(s)")
+                total = h.get("agent_count", 0)
+                active = h.get("active_agent_count", 0)
+                inactive = h.get("inactive_agent_count", 0)
+                click.echo(f"  Hub {h['hub_id'][:12]}... — {online}")
+                click.echo(f"    Total agents: {total}")
+                click.echo(f"    Active:       {active}")
+                click.echo(f"    Inactive:     {inactive}")
         finally:
             await relay.close()
 
