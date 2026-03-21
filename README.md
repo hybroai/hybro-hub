@@ -49,6 +49,13 @@ Go to [hybro.ai/d/discovery-api-keys](https://hybro.ai/d/discovery-api-keys) →
 hybro-hub start --api-key hybro_your_key_here
 ```
 
+The hub starts as a **background daemon** and returns you to the prompt immediately. Logs are written to `~/.hybro/hub.log`. The API key is saved to `~/.hybro/config.yaml` — subsequent starts don't need it.
+
+```bash
+hybro-hub status   # check local daemon state and cloud connection
+hybro-hub stop     # stop the daemon gracefully
+```
+
 ### 4. Launch a local agent
 
 Start a local LLM as an A2A agent (requires [Ollama](https://ollama.com) installed):
@@ -142,21 +149,57 @@ The hub scans outbound messages for sensitive content before they reach cloud ag
 
 ### `hybro-hub start`
 
-Start the hub daemon. Connects to hybro.ai, discovers local agents, and syncs them to the cloud.
+Start the hub daemon. Connects to hybro.ai, discovers local agents, and syncs them to the cloud. The process detaches immediately and runs in the background.
 
 ```bash
 hybro-hub start --api-key hybro_...
 ```
 
-The API key is saved to `~/.hybro/config.yaml` after first use — subsequent starts don't need it.
+The API key is saved to `~/.hybro/config.yaml` after first use — subsequent starts don't need it. Only one instance can run per machine; a second `start` will exit with an error if the daemon is already running.
+
+**Options:**
+
+| Option | Description |
+| --- | --- |
+| `--api-key` | Hybro API key (also saves to `~/.hybro/config.yaml`) |
+| `--foreground`, `-f` | Run in the foreground instead of daemonizing (useful for debugging) |
+
+Daemon logs are written to `~/.hybro/hub.log` (rotating, max 10 MB × 3 files).
+
+### `hybro-hub stop`
+
+Gracefully stop the background daemon. Sends `SIGTERM` and waits up to 10 seconds before sending `SIGKILL`. Removes the PID lock file on success so that `hybro-hub status` correctly shows "Stopped".
+
+```bash
+hybro-hub stop
+```
 
 ### `hybro-hub status`
 
-Check if the hub is connected and how many agents are synced.
+Show the state of the local daemon and its connection to the cloud relay.
 
 ```bash
 hybro-hub status
 ```
+
+Example output when running:
+
+```
+  Local daemon:  Running (PID 12345)
+  Log file:      /Users/you/.hybro/hub.log
+  Cloud relay:   Online (hub abc123...)
+  Agents:        3 total (3 active, 0 inactive)
+```
+
+Example output when stopped:
+
+```
+  Local daemon:  Stopped
+  Cloud relay:   Online (hub abc123...)
+  Agents:        4 total (3 active, 1 inactive)
+```
+
+> The cloud relay section queries hybro.ai directly, so it reflects the last known state even when the local daemon is not running.
 
 ### `hybro-hub agents`
 

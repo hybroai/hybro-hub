@@ -478,9 +478,10 @@ wheels = [
 
 [[package]]
 name = "hybro-hub"
-version = "0.1.4"
+version = "0.1.6"
 source = { editable = "." }
 dependencies = [
+    { name = "a2a-adapter" },
     { name = "a2a-sdk" },
     { name = "click" },
     { name = "httpx" },
@@ -496,13 +497,10 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "respx" },
 ]
-ollama = [
-    { name = "a2a-adapter" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "a2a-adapter", marker = "extra == 'ollama'" },
+    { name = "a2a-adapter" },
     { name = "a2a-sdk", specifier = ">=0.3,<1" },
     { name = "click", specifier = ">=8.0" },
     { name = "httpx", specifier = ">=0.27,<1" },
@@ -514,7 +512,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22" },
 ]
-provides-extras = ["ollama", "dev"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "hyperlink"

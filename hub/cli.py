@@ -4,14 +4,34 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
 import click
 import httpx
 
-from .config import load_config, save_api_key
+from .config import (
+    LOCK_FILE,
+    LOG_FILE,
+    acquire_instance_lock,
+    load_config,
+    read_lock_pid,
+    save_api_key,
+    write_lock_pid,
+)
 from .main import HubDaemon
 from .relay_client import RelayClient
+
+_STOP_TIMEOUT = 10  # seconds to wait for graceful shutdown before SIGKILL
+_ENV_DAEMON_CHILD = "HYBRO_HUB_DAEMON_CHILD"  # set to "1" in the detached child
+
+
+def _remove_lock_file() -> None:
+    """Delete the lock file after a clean stop. Silent no-op if already gone."""
+    try:
+        LOCK_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -24,6 +44,94 @@ def _setup_logging(verbose: bool) -> None:
     # Quiet noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+def _add_file_logging(verbose: bool) -> None:
+    """Attach a rotating file handler to the root logger for daemon mode."""
+    from logging.handlers import RotatingFileHandler
+
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.getLogger().setLevel(level)
+    handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=10 * 1024 * 1024,  # 10 MB per file
+        backupCount=3,
+        encoding="utf-8",
+    )
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    )
+    handler.setLevel(level)
+    logging.getLogger().addHandler(handler)
+
+
+def _detach_windows() -> None:
+    """Re-launch the current command as a detached background process (Windows only).
+
+    Passes HYBRO_HUB_DAEMON_CHILD=1 in the environment so the child knows it
+    should run as the daemon instead of spawning yet another child.
+    stdout/stderr of the child are redirected to the log file.
+    """
+    import subprocess
+
+    DETACHED_PROCESS = 0x00000008
+    CREATE_NO_WINDOW = 0x08000000
+
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env[_ENV_DAEMON_CHILD] = "1"
+
+    log_f = open(LOG_FILE, "a", encoding="utf-8")  # noqa: SIM115
+    try:
+        subprocess.Popen(
+            sys.argv,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=log_f,
+            creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+        )
+    finally:
+        log_f.close()
+
+
+
+def _daemonize() -> None:
+    """Double-fork daemonize (Unix only).
+
+    Returns in the final daemon child process.  All intermediate parents exit
+    via os._exit() to skip atexit/finalizer side-effects.
+    The open lock file handle is inherited by the child so the flock stays held.
+    """
+    # First fork — detaches from the parent's process group
+    pid = os.fork()
+    if pid > 0:
+        os._exit(0)
+
+    os.setsid()  # become session leader; detach from controlling terminal
+
+    # Second fork — ensures the daemon can never re-acquire a terminal
+    pid = os.fork()
+    if pid > 0:
+        os._exit(0)
+
+    os.chdir("/")  # don't hold any mount point
+    os.umask(0o022)
+
+    # Redirect stdin to /dev/null; stdout/stderr go to the log file so that
+    # any stray print() calls or C-level output also ends up in the log.
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    devnull_fd = os.open(os.devnull, os.O_RDONLY)
+    log_fd = os.open(str(LOG_FILE), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.dup2(devnull_fd, sys.stdin.fileno())
+    os.dup2(log_fd, sys.stdout.fileno())
+    os.dup2(log_fd, sys.stderr.fileno())
+    os.close(devnull_fd)
+    os.close(log_fd)
 
 
 @click.group()
@@ -40,9 +148,19 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
 @main.command()
 @click.option("--api-key", default=None, help="Hybro API key (also saves to config).")
+@click.option(
+    "--foreground", "-f", is_flag=True,
+    help="Run in the foreground instead of as a background daemon.",
+)
 @click.pass_context
-def start(ctx: click.Context, api_key: str | None) -> None:
-    """Start the hub daemon (foreground)."""
+def start(ctx: click.Context, api_key: str | None, foreground: bool) -> None:
+    """Start the hub daemon (background by default).
+
+    Logs are written to ~/.hybro/hub.log.
+    Use --foreground / -f to keep the process attached to the terminal.
+    """
+    verbose: bool = ctx.obj.get("verbose", False)
+
     if api_key:
         save_api_key(api_key)
 
@@ -56,8 +174,103 @@ def start(ctx: click.Context, api_key: str | None) -> None:
         )
         sys.exit(1)
 
+    # Acquire the instance lock before forking so the parent can report errors.
+    lock_fh = acquire_instance_lock()
+
+    if foreground:
+        write_lock_pid(lock_fh)
+        daemon = HubDaemon(config)
+        asyncio.run(daemon.run())
+        return
+
+    # ── background daemon path ──
+
+    if sys.platform == "win32":
+        if os.environ.get(_ENV_DAEMON_CHILD) == "1":
+            # We are the detached child — run the daemon.
+            write_lock_pid(lock_fh)
+            logging.getLogger().handlers.clear()
+            _add_file_logging(verbose)
+            daemon = HubDaemon(config)
+            asyncio.run(daemon.run())
+        else:
+            # We are the launcher — spawn a detached child and exit.
+            lock_fh.close()  # release before spawning so child can re-acquire
+            _detach_windows()
+            click.echo(f"Hub daemon started in background. Logs: {LOG_FILE}")
+        return
+
+    # ── Unix: double-fork ──
+    _daemonize()
+
+    # We are now the daemon child.
+    write_lock_pid(lock_fh)
+
+    # Re-configure logging: basicConfig was already called in the parent but
+    # stdout is now the log file; add a proper RotatingFileHandler instead.
+    logging.getLogger().handlers.clear()
+    _add_file_logging(verbose)
+
     daemon = HubDaemon(config)
     asyncio.run(daemon.run())
+
+
+# ──── hybro-hub stop ────
+
+@main.command()
+def stop() -> None:
+    """Stop the running hub daemon."""
+    import signal
+    import time
+
+    import psutil
+
+    pid = read_lock_pid()
+    if pid is None:
+        click.echo("No hub daemon is running (lock file not found or empty).")
+        sys.exit(0)
+
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        click.echo(f"No process with PID {pid} found — daemon is not running.")
+        sys.exit(0)
+
+    # Guard against stale PID reuse: verify the process looks like hybro-hub.
+    try:
+        cmdline = proc.cmdline()
+        is_hub = any("hybro" in part.lower() or "hub" in part.lower() for part in cmdline)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        click.echo(f"No process with PID {pid} found — daemon is not running.")
+        sys.exit(0)
+
+    if not is_hub:
+        click.echo(
+            f"PID {pid} exists but does not look like a hybro-hub process "
+            f"(cmdline: {cmdline}). Lock file may be stale."
+        )
+        sys.exit(1)
+
+    click.echo(f"Stopping hub daemon (PID {pid})...")
+    proc.send_signal(signal.SIGTERM)
+
+    # Wait up to _STOP_TIMEOUT seconds for graceful shutdown
+    deadline = time.time() + _STOP_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(0.25)
+        if not psutil.pid_exists(pid):
+            _remove_lock_file()
+            click.echo("Hub daemon stopped.")
+            return
+
+    # Still alive — force kill
+    click.echo(f"Daemon did not stop within {_STOP_TIMEOUT}s — sending SIGKILL.")
+    try:
+        proc.kill()
+    except psutil.NoSuchProcess:
+        pass
+    _remove_lock_file()
+    click.echo("Hub daemon killed.")
 
 
 # ──── hybro-hub status ────
@@ -65,13 +278,40 @@ def start(ctx: click.Context, api_key: str | None) -> None:
 @main.command()
 @click.pass_context
 def status(ctx: click.Context) -> None:
-    """Show hub status from the relay service."""
+    """Show local daemon state and cloud relay status."""
+    import psutil
+
+    # ── Local daemon section ──────────────────────────────────────────────────
+    pid = read_lock_pid()
+    daemon_running = False
+    if pid is not None:
+        try:
+            proc = psutil.Process(pid)
+            cmdline = proc.cmdline()
+            daemon_running = any(
+                "hybro" in part.lower() or "hub" in part.lower()
+                for part in cmdline
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            daemon_running = False
+
+    if daemon_running:
+        click.echo(f"  Local daemon:  Running (PID {pid})")
+        click.echo(f"  Log file:      {LOG_FILE}")
+    else:
+        click.echo("  Local daemon:  Stopped")
+        if pid is not None:
+            click.echo(f"  (stale PID {pid} in lock file — daemon may have crashed)")
+
+    click.echo("")
+
+    # ── Cloud relay section ───────────────────────────────────────────────────
     config = load_config()
     if not config.api_key:
-        click.echo("Error: No API key configured.", err=True)
-        sys.exit(1)
+        click.echo("  Cloud relay:   (no API key configured — run: hybro-hub start --api-key hybro_...)")
+        return
 
-    async def _status() -> None:
+    async def _cloud_status() -> None:
         relay = RelayClient(
             gateway_url=config.gateway_url,
             hub_id=config.hub_id,
@@ -81,21 +321,28 @@ def status(ctx: click.Context) -> None:
             data = await relay.get_status()
             hubs = data.get("hubs", [])
             if not hubs:
-                click.echo("No hubs registered.")
+                click.echo("  Cloud relay:   No hubs registered.")
                 return
             for h in hubs:
-                online = "Online" if h.get("is_online") else "Offline"
+                cloud_state = "Online" if h.get("is_online") else "Offline"
                 total = h.get("agent_count", 0)
                 active = h.get("active_agent_count", 0)
                 inactive = h.get("inactive_agent_count", 0)
-                click.echo(f"  Hub {h['hub_id'][:12]}... — {online}")
-                click.echo(f"    Total agents: {total}")
-                click.echo(f"    Active:       {active}")
-                click.echo(f"    Inactive:     {inactive}")
+                click.echo(f"  Cloud relay:   {cloud_state} (hub {h['hub_id'][:12]}...)")
+                click.echo(f"  Agents:        {total} total ({active} active, {inactive} inactive)")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                click.echo("  Cloud relay:   Authentication failed — check your API key.")
+            elif exc.response.status_code == 403:
+                click.echo("  Cloud relay:   Access denied.")
+            else:
+                click.echo(f"  Cloud relay:   Error {exc.response.status_code} from server.")
+        except Exception as exc:
+            click.echo(f"  Cloud relay:   Unreachable ({exc})")
         finally:
             await relay.close()
 
-    asyncio.run(_status())
+    asyncio.run(_cloud_status())
 
 
 # ──── hybro-hub agents ────
