@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "hybro-hub"
 version = "0.1.7"
-description = "Python SDK for the Hybro Gateway API — discover and communicate with cloud A2A agents."
+description = "Hybro Hub — daemon and Gateway client for connecting local and cloud A2A agents on hybro.ai."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [
-    { name = "Hybro", email = "dev@hybro.ai" },
+    { name = "Hybro", email = "info@hybro.ai" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Typing :: Typed",
 ]
 dependencies = [
@@ -44,7 +45,8 @@ hybro-hub = "hub.cli:main"
 
 [project.urls]
 Homepage = "https://hybro.ai"
-Repository = "https://github.com/hybro-ai/hybro-hub"
+Documentation = "https://github.com/hybroai/hybro-hub#readme"
+Repository = "https://github.com/hybroai/hybro-hub"
 
 [tool.hatch.build.targets.wheel]
 packages = ["hybro_hub", "hub"]
