@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.7] - 2026-03-21
+
+### Added
+
+- Background daemon for `hybro-hub start` (Unix double-fork, Windows detached re-launch); `--foreground` / `-f` keeps the process in the terminal
+- `hybro-hub stop` — SIGTERM with timeout, then SIGKILL; removes `~/.hybro/hub.lock` when the daemon exits
+- Exclusive instance lock and PID file at `~/.hybro/hub.lock` (fcntl on Unix, `msvcrt` on Windows)
+- Rotating daemon logs at `~/.hybro/hub.log` (10 MB × 3 files)
+- `hybro-hub status` reports local daemon state (running / stopped / stale PID) and clearer cloud relay errors (401 vs other HTTP vs unreachable)
+- CLI tests for `status`, plus coverage for lock, start, and stop paths
+
+### Changed
+
+- `load_config` logs successful file loads at DEBUG instead of INFO for quieter user-facing CLI output
+
 ## [0.1.6] - 2026-03-20
 
 ### Changed
