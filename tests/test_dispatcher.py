@@ -59,6 +59,7 @@ class TestDispatchSync:
             },
         }
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client.post = AsyncMock(return_value=mock_resp)
         dispatcher._client = mock_client
 
@@ -81,6 +82,7 @@ class TestDispatchSync:
     async def test_dispatch_sync_error(self, agent):
         dispatcher = Dispatcher()
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client.post = AsyncMock(side_effect=Exception("connection failed"))
         dispatcher._client = mock_client
 
@@ -103,6 +105,7 @@ class TestDispatchSync:
         """Exceptions whose str() is empty must still emit agent_error, not agent_response."""
         dispatcher = Dispatcher()
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client.post = AsyncMock(side_effect=TimeoutError())
         dispatcher._client = mock_client
 
@@ -308,6 +311,7 @@ class TestDispatchStreaming:
 
         dispatcher = Dispatcher()
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client._canned_events = canned
         dispatcher._client = mock_client
 
@@ -362,6 +366,7 @@ class TestDispatchStreaming:
 
         dispatcher = Dispatcher()
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client._canned_events = canned
         dispatcher._client = mock_client
 
@@ -401,6 +406,7 @@ class TestDispatchStreaming:
 
         dispatcher = Dispatcher()
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client._canned_events = canned
         dispatcher._client = mock_client
 

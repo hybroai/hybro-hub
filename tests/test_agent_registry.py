@@ -60,6 +60,7 @@ class TestDiscovery:
         mock_resp.json.return_value = SAMPLE_CARD
 
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client.get = AsyncMock(return_value=mock_resp)
         registry._client = mock_client
 
@@ -93,6 +94,7 @@ class TestDiscovery:
             raise httpx.ConnectError("refused")
 
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client.get = mock_get
         registry._client = mock_client
 
@@ -136,6 +138,7 @@ class TestDiscovery:
             return resp
 
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client.get = mock_get
         registry._client = mock_client
 
@@ -153,6 +156,7 @@ class TestSyncPayload:
         mock_resp.status_code = 200
         mock_resp.json.return_value = SAMPLE_CARD
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client.get = AsyncMock(return_value=mock_resp)
         registry._client = mock_client
 
@@ -173,6 +177,7 @@ class TestHealthCheck:
         mock_resp.status_code = 200
         mock_resp.json.return_value = SAMPLE_CARD
         mock_client = AsyncMock()
+        mock_client.is_closed = False
         mock_client.get = AsyncMock(return_value=mock_resp)
         registry._client = mock_client
         await registry.discover()
