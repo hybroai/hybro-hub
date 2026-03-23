@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+from typing import Callable
 
 import click
 import httpx
@@ -44,6 +45,10 @@ def _setup_logging(verbose: bool) -> None:
     # Quiet noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # Suppress internal hub chatter unless --verbose is passed; one-shot CLI
+    # commands (agents, status) already surface the same info via click.echo.
+    if not verbose:
+        logging.getLogger("hub").setLevel(logging.WARNING)
 
 
 def _add_file_logging(verbose: bool) -> None:
@@ -67,6 +72,35 @@ def _add_file_logging(verbose: bool) -> None:
     )
     handler.setLevel(level)
     logging.getLogger().addHandler(handler)
+
+
+def _spinning_wait(
+    message: str,
+    check_fn: Callable[[], bool],
+    interval: float = 0.25,
+    timeout: float = _STOP_TIMEOUT,
+) -> bool:
+    """Blocking wait with animated dots on stderr. Returns True if check_fn became True."""
+    import time
+
+    frames = ["   ", ".  ", ".. ", "..."]
+    i = 0
+    deadline = time.time() + timeout
+    is_tty = sys.stderr.isatty()
+
+    while time.time() < deadline:
+        if check_fn():
+            if is_tty:
+                click.echo("\r" + " " * (len(message) + 6) + "\r", nl=False, err=True)
+            return True
+        if is_tty:
+            click.echo(f"\r{message}{frames[i % len(frames)]}", nl=False, err=True)
+            i += 1
+        time.sleep(interval)
+
+    if is_tty:
+        click.echo("\r" + " " * (len(message) + 6) + "\r", nl=False, err=True)
+    return False
 
 
 def _detach_windows() -> None:
@@ -161,6 +195,10 @@ def start(ctx: click.Context, api_key: str | None, foreground: bool) -> None:
     """
     verbose: bool = ctx.obj.get("verbose", False)
 
+    # Restore hub.* logging to INFO for the daemon — _setup_logging silences it
+    # by default so that one-shot CLI commands (agents, status) stay clean.
+    logging.getLogger("hub").setLevel(logging.DEBUG if verbose else logging.INFO)
+
     if api_key:
         save_api_key(api_key)
 
@@ -201,6 +239,7 @@ def start(ctx: click.Context, api_key: str | None, foreground: bool) -> None:
         return
 
     # ── Unix: double-fork ──
+    click.echo(f"Hub daemon starting in background. Logs: {LOG_FILE}")
     _daemonize()
 
     # We are now the daemon child.
@@ -214,26 +253,25 @@ def start(ctx: click.Context, api_key: str | None, foreground: bool) -> None:
     daemon = HubDaemon(config)
     asyncio.run(daemon.run())
 
-
 # ──── hybro-hub stop ────
 
 @main.command()
 def stop() -> None:
     """Stop the running hub daemon."""
     import signal
-    import time
 
     import psutil
 
     pid = read_lock_pid()
     if pid is None:
-        click.echo("No hub daemon is running (lock file not found or empty).")
+        click.echo("Hub daemon is not running.")
         sys.exit(0)
 
     try:
         proc = psutil.Process(pid)
     except psutil.NoSuchProcess:
-        click.echo(f"No process with PID {pid} found — daemon is not running.")
+        click.echo(f"Hub daemon is not running (stale PID {pid} — cleaning up).")
+        _remove_lock_file()
         sys.exit(0)
 
     # Guard against stale PID reuse: verify the process looks like hybro-hub.
@@ -241,30 +279,35 @@ def stop() -> None:
         cmdline = proc.cmdline()
         is_hub = any("hybro" in part.lower() or "hub" in part.lower() for part in cmdline)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
-        click.echo(f"No process with PID {pid} found — daemon is not running.")
+        click.echo(f"Hub daemon is not running (stale PID {pid} — cleaning up).")
+        _remove_lock_file()
         sys.exit(0)
 
     if not is_hub:
         click.echo(
-            f"PID {pid} exists but does not look like a hybro-hub process "
-            f"(cmdline: {cmdline}). Lock file may be stale."
+            f"PID {pid} belongs to a different process — lock file is stale.\n"
+            f"Run: rm {LOCK_FILE}"
         )
         sys.exit(1)
 
-    click.echo(f"Stopping hub daemon (PID {pid})...")
+    if not sys.stderr.isatty():
+        click.echo(f"Stopping hub daemon (PID {pid})...")
     proc.send_signal(signal.SIGTERM)
 
-    # Wait up to _STOP_TIMEOUT seconds for graceful shutdown
-    deadline = time.time() + _STOP_TIMEOUT
-    while time.time() < deadline:
-        time.sleep(0.25)
-        if not psutil.pid_exists(pid):
-            _remove_lock_file()
-            click.echo("Hub daemon stopped.")
-            return
+    stopped = _spinning_wait(
+        f"Stopping hub daemon (PID {pid})",
+        check_fn=lambda: not psutil.pid_exists(pid),
+        interval=0.25,
+        timeout=_STOP_TIMEOUT,
+    )
+
+    if stopped:
+        _remove_lock_file()
+        click.echo("Hub daemon stopped.")
+        return
 
     # Still alive — force kill
-    click.echo(f"Daemon did not stop within {_STOP_TIMEOUT}s — sending SIGKILL.")
+    click.echo(f"Daemon did not stop after {_STOP_TIMEOUT}s — force killing.")
     try:
         proc.kill()
     except psutil.NoSuchProcess:
@@ -296,22 +339,46 @@ def status(ctx: click.Context) -> None:
             daemon_running = False
 
     if daemon_running:
-        click.echo(f"  Local daemon:  Running (PID {pid})")
-        click.echo(f"  Log file:      {LOG_FILE}")
+        click.echo(f"  ✓  Local daemon   Running (PID {pid})")
+        click.echo(f"     Log file:      {LOG_FILE}")
     else:
-        click.echo("  Local daemon:  Stopped")
+        click.echo("  ✗  Local daemon   Stopped")
         if pid is not None:
-            click.echo(f"  (stale PID {pid} in lock file — daemon may have crashed)")
+            click.echo(f"     (stale PID {pid} — daemon may have crashed)")
 
     click.echo("")
 
     # ── Cloud relay section ───────────────────────────────────────────────────
     config = load_config()
     if not config.api_key:
-        click.echo("  Cloud relay:   (no API key configured — run: hybro-hub start --api-key hybro_...)")
+        click.echo("     Cloud relay:   No API key — run: hybro-hub start --api-key hybro_...")
         return
 
     async def _cloud_status() -> None:
+        stop_event = asyncio.Event()
+
+        async def _animate() -> None:
+            frames = ["   ", ".  ", ".. ", "..."]
+            i = 0
+            while True:
+                click.echo(
+                    f"\r  Checking cloud relay{frames[i % len(frames)]}",
+                    nl=False,
+                    err=True,
+                )
+                i += 1
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=0.4)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+            click.echo("\r" + " " * 40 + "\r", nl=False, err=True)
+
+        if sys.stderr.isatty():
+            anim_task = asyncio.create_task(_animate())
+        else:
+            anim_task = None
+
         relay = RelayClient(
             gateway_url=config.gateway_url,
             hub_id=config.hub_id,
@@ -321,25 +388,30 @@ def status(ctx: click.Context) -> None:
             data = await relay.get_status()
             hubs = data.get("hubs", [])
             if not hubs:
-                click.echo("  Cloud relay:   No hubs registered.")
+                click.echo("  ✗  Cloud relay    No hubs registered.")
                 return
             for h in hubs:
-                cloud_state = "Online" if h.get("is_online") else "Offline"
+                online = h.get("is_online")
+                symbol = "✓" if online else "✗"
+                state = "Online" if online else "Offline"
                 total = h.get("agent_count", 0)
                 active = h.get("active_agent_count", 0)
                 inactive = h.get("inactive_agent_count", 0)
-                click.echo(f"  Cloud relay:   {cloud_state} (hub {h['hub_id'][:12]}...)")
-                click.echo(f"  Agents:        {total} total ({active} active, {inactive} inactive)")
+                click.echo(f"  {symbol}  Cloud relay    {state} (hub {h['hub_id'][:12]}...)")
+                click.echo(f"     Agents:        {total} total  {active} active  {inactive} inactive")
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
-                click.echo("  Cloud relay:   Authentication failed — check your API key.")
+                click.echo("  ✗  Cloud relay    Authentication failed — check your API key.")
             elif exc.response.status_code == 403:
-                click.echo("  Cloud relay:   Access denied.")
+                click.echo("  ✗  Cloud relay    Access denied.")
             else:
-                click.echo(f"  Cloud relay:   Error {exc.response.status_code} from server.")
+                click.echo(f"  ✗  Cloud relay    Error {exc.response.status_code} from server.")
         except Exception as exc:
-            click.echo(f"  Cloud relay:   Unreachable ({exc})")
+            click.echo(f"  ✗  Cloud relay    Unreachable ({exc})")
         finally:
+            if anim_task is not None:
+                stop_event.set()
+                await anim_task
             await relay.close()
 
     asyncio.run(_cloud_status())
@@ -356,15 +428,50 @@ def agents(ctx: click.Context) -> None:
     config = load_config()
 
     async def _agents() -> None:
+        stop_event = asyncio.Event()
+
+        async def _animate() -> None:
+            frames = ["   ", ".  ", ".. ", "..."]
+            i = 0
+            while True:
+                click.echo(
+                    f"\rScanning for local A2A agents{frames[i % len(frames)]}",
+                    nl=False,
+                    err=True,
+                )
+                i += 1
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=0.4)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+            # Erase the scanning line
+            click.echo("\r" + " " * 50 + "\r", nl=False, err=True)
+
+        if sys.stderr.isatty():
+            anim_task = asyncio.create_task(_animate())
+        else:
+            click.echo("Scanning for local A2A agents...", err=True)
+            anim_task = None
+
         registry = AgentRegistry(config)
         found = await registry.discover()
         await registry.close()
+
+        if anim_task is not None:
+            stop_event.set()
+            await anim_task
+
         if not found:
             click.echo("No local agents found.")
             return
+        n = len(found)
+        click.echo(f"Found {n} agent{'s' if n != 1 else ''}:\n")
         for a in found:
-            health = "healthy" if a.healthy else "unhealthy"
-            click.echo(f"  {a.name} — {a.url} — {health} (id={a.local_agent_id})")
+            symbol = "✓" if a.healthy else "✗"
+            click.echo(f"  {symbol}  {a.name}")
+            click.echo(f"     URL: {a.url}")
+            click.echo(f"     ID:  {a.local_agent_id}")
 
     asyncio.run(_agents())
 
@@ -526,13 +633,14 @@ def agent_start(
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
-    click.echo(f"Starting {adapter_type} A2A adapter (port={port})...")
-    click.echo(f"  Name: {config.get('name', adapter_type)}")
+    click.echo(f"\nStarting {adapter_type} adapter on port {port}...")
+    click.echo(f"  Name:    {config.get('name', adapter_type)}")
     if adapter_type == "ollama":
-        click.echo(f"  Model: {config['model']}")
+        click.echo(f"  Model:   {config['model']}")
     elif adapter_type == "openclaw":
         click.echo(f"  Thinking: {config.get('thinking', 'low')}")
     elif adapter_type == "n8n":
         click.echo(f"  Webhook: {webhook_url}")
+    click.echo("")
 
     serve_agent(adapter, port=port)

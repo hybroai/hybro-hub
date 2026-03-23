@@ -368,7 +368,7 @@ class TestStopNoLockFile:
         with patch("hub.cli.read_lock_pid", return_value=None):
             result = runner.invoke(main, ["stop"])
         assert result.exit_code == 0
-        assert "no hub daemon is running" in result.output.lower()
+        assert "not running" in result.output.lower()
 
 
 class TestStopPidNotFound:
@@ -411,9 +411,7 @@ class TestStopGracefulShutdown:
 
         with patch("hub.cli.read_lock_pid", return_value=42), \
              patch("psutil.Process", return_value=mock_proc), \
-             patch("psutil.pid_exists", side_effect=[True, False]), \
-             patch("time.time", side_effect=[0, 0.3, 0.6]), \
-             patch("time.sleep"), \
+             patch("hub.cli._spinning_wait", return_value=True), \
              patch("hub.cli._remove_lock_file") as mock_rm:
             result = runner.invoke(main, ["stop"])
 
@@ -428,15 +426,13 @@ class TestStopGracefulShutdown:
 
         with patch("hub.cli.read_lock_pid", return_value=42), \
              patch("psutil.Process", return_value=mock_proc), \
-             patch("psutil.pid_exists", return_value=True), \
-             patch("time.time", side_effect=[0, 0, 11, 11]), \
-             patch("time.sleep"), \
+             patch("hub.cli._spinning_wait", return_value=False), \
              patch("hub.cli._remove_lock_file") as mock_rm:
             result = runner.invoke(main, ["stop"])
 
         mock_proc.kill.assert_called_once()
         mock_rm.assert_called_once()
-        assert "killed" in result.output.lower() or "sigkill" in result.output.lower()
+        assert "killed" in result.output.lower() or "force" in result.output.lower()
 
     def test_kill_tolerates_process_already_gone(self, runner):
         import psutil
@@ -447,9 +443,7 @@ class TestStopGracefulShutdown:
 
         with patch("hub.cli.read_lock_pid", return_value=42), \
              patch("psutil.Process", return_value=mock_proc), \
-             patch("psutil.pid_exists", return_value=True), \
-             patch("time.time", side_effect=[0, 0, 11, 11]), \
-             patch("time.sleep"), \
+             patch("hub.cli._spinning_wait", return_value=False), \
              patch("hub.cli._remove_lock_file"):
             result = runner.invoke(main, ["stop"])
 
