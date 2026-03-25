@@ -11,8 +11,10 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
+from typing import IO, Any, get_origin
+
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,23 @@ class HubConfig(BaseModel):
     # Optional [start, end] range for the connect-scan fallback strategy.
     # When null the full unprivileged range (1024–65535) is used.
     auto_discover_scan_range: list[int] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_null_lists(cls, data: object) -> object:
+        """Coerce None → [] for any field annotated as list[...].
+
+        Guards against YAML `key: null` which is parsed as None and bypasses
+        .get(key, default) — the default is only used when the key is absent.
+        Fields typed list[X] | None (e.g. auto_discover_scan_range) are
+        intentionally left alone because their Union origin is not `list`.
+        """
+        if not isinstance(data, dict):
+            return data
+        for name, field in cls.model_fields.items():
+            if data.get(name) is None and get_origin(field.annotation) is list:
+                data[name] = []
+        return data
 
     @field_validator("auto_discover_scan_range")
     @classmethod
@@ -121,7 +140,10 @@ def load_config(
             # Flatten agents.local -> agents
             agents_section = data.pop("agents", None)
             if isinstance(agents_section, dict):
-                data["agents"] = agents_section.get("local", [])
+                # Use `or []` to guard against `local: null` in YAML —
+                # .get(key, default) does NOT use the default when the key is
+                # present with a None value, so we need the explicit `or []`.
+                data["agents"] = agents_section.get("local") or []
                 if "auto_discover" in agents_section:
                     data["auto_discover"] = agents_section["auto_discover"]
                 if "auto_discover_exclude_ports" in agents_section:
@@ -170,7 +192,7 @@ LOCK_FILE = HYBRO_DIR / "hub.lock"
 LOG_FILE = HYBRO_DIR / "hub.log"
 
 
-def acquire_instance_lock() -> "IO[Any]":
+def acquire_instance_lock() -> IO[Any]:
     """Acquire an exclusive lock on ~/.hybro/hub.lock.
 
     Returns the open file object — it must stay open for the lock to be held.
@@ -180,8 +202,6 @@ def acquire_instance_lock() -> "IO[Any]":
 
     Raises SystemExit with a clear message if another instance is already running.
     """
-    from typing import IO, Any
-
     HYBRO_DIR.mkdir(parents=True, exist_ok=True)
     lock_fh: IO[Any] = open(LOCK_FILE, "w", encoding="utf-8")  # noqa: SIM115
 
@@ -213,7 +233,7 @@ def acquire_instance_lock() -> "IO[Any]":
     return lock_fh
 
 
-def write_lock_pid(lock_fh: "IO[Any]") -> None:
+def write_lock_pid(lock_fh: IO[Any]) -> None:
     """Write (or overwrite) the current process's PID into the lock file."""
     lock_fh.seek(0)
     lock_fh.write(str(os.getpid()))
