@@ -203,7 +203,7 @@ def start(ctx: click.Context, api_key: str | None, foreground: bool) -> None:
         save_api_key(api_key)
 
     config = load_config(api_key=api_key)
-    if not config.api_key:
+    if config.cloud.api_key is None:
         click.echo(
             "Error: No API key configured.\n"
             "Run: hybro-hub start --api-key hybro_...\n"
@@ -350,7 +350,7 @@ def status(ctx: click.Context) -> None:
 
     # ── Cloud relay section ───────────────────────────────────────────────────
     config = load_config()
-    if not config.api_key:
+    if config.cloud.api_key is None:
         click.echo("     Cloud relay:   No API key — run: hybro-hub start --api-key hybro_...")
         return
 
@@ -380,9 +380,9 @@ def status(ctx: click.Context) -> None:
             anim_task = None
 
         relay = RelayClient(
-            gateway_url=config.gateway_url,
+            gateway_url=config.cloud.gateway_url,
             hub_id=config.hub_id,
-            api_key=config.api_key,
+            api_key=config.cloud.api_key or "",
         )
         try:
             data = await relay.get_status()

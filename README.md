@@ -263,7 +263,11 @@ The hub reads from `~/.hybro/config.yaml`. A full example:
 ```yaml
 # Cloud connection
 cloud:
-  api_key: "hybro_..."
+  # Paste your key directly, or reference a shell environment variable:
+  #   api_key: "hybro_your_key_here"
+  #   api_key: ${HYBRO_API_KEY}
+  # Note: env var values must not contain YAML special characters (# : { } [ ])
+  api_key: ${HYBRO_API_KEY}
   gateway_url: "https://api.hybro.ai"
 
 # Agent discovery
@@ -279,7 +283,6 @@ agents:
 
 # Privacy
 privacy:
-  default_routing: "local_first"
   sensitive_keywords: ["medical", "financial", "confidential"]
   sensitive_patterns: ["PROJ-\\d{4}"]
 
@@ -287,11 +290,16 @@ privacy:
 heartbeat_interval: 30
 ```
 
-You can also set the API key and gateway URL via environment variables:
+The config file supports `${VAR}` and `${VAR:-default}` environment variable references (expanded before parsing, matching the OTel Collector convention). To set the API key via a shell environment variable without editing the file, add to your shell profile:
 
 ```bash
 export HYBRO_API_KEY="hybro_..."
-export HYBRO_GATEWAY_URL="https://api.hybro.ai"
+```
+
+Or set it once via the CLI (saves the literal key to the config file):
+
+```bash
+hybro-hub start --api-key hybro_...
 ```
 
 ---

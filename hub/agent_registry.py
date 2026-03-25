@@ -97,10 +97,10 @@ class AgentRegistry:
 
     async def discover(self) -> list[LocalAgent]:
         """Run full discovery: manual config + auto-discovery."""
-        for ac in self._config.agents:
+        for ac in self._config.agents.local:
             await self._probe_and_register(ac.url, ac.name)
 
-        if self._config.auto_discover:
+        if self._config.agents.auto_discover:
             await self._auto_discover()
 
         logger.info("Registry has %d agents", len(self._agents))
@@ -109,11 +109,11 @@ class AgentRegistry:
     async def _auto_discover(self) -> None:
         """Discover A2A agents by enumerating listening localhost ports."""
         scan_range: tuple[int, int] | None = None
-        if self._config.auto_discover_scan_range:
-            scan_range = tuple(self._config.auto_discover_scan_range)  # type: ignore[assignment]
+        if self._config.agents.auto_discover_scan_range:
+            scan_range = tuple(self._config.agents.auto_discover_scan_range)  # type: ignore[assignment]
 
         ports = _get_listening_ports(
-            exclude=set(self._config.auto_discover_exclude_ports),
+            exclude=set(self._config.agents.auto_discover_exclude_ports),
             scan_range=scan_range,
         )
         if not ports:

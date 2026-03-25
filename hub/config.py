@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -26,12 +27,16 @@ CONFIG_FILE = HYBRO_DIR / "config.yaml"
 class LocalAgentConfig(BaseModel):
     """A manually-configured local A2A agent."""
 
+    model_config = {"frozen": True}
+
     name: str
     url: str
 
 
 class PublishQueueConfig(BaseModel):
     """Configuration for the disk-backed publish queue."""
+
+    model_config = {"frozen": True}
 
     enabled: bool = True
     max_size_mb: int = 50           # Max disk usage in MB
@@ -42,17 +47,43 @@ class PublishQueueConfig(BaseModel):
     # Per-category retry limits (power-user tuning)
     max_retries_critical: int = 20  # agent_response, agent_error, processing_status
     max_retries_normal: int = 5     # task_submitted, artifact_update, task_status
-    max_retries_streaming: int = 3  # Unused: retained for config-file backward compat
 
 
-class HubConfig(BaseModel):
-    """Hub daemon configuration."""
+def _coerce_nulls(model_cls: type[BaseModel], data: dict) -> dict:
+    """Coerce None → [] for any field annotated as list[X].
 
-    api_key: str = ""
+    Guards against YAML `key: null` (parsed as None) bypassing field defaults.
+    Union-typed fields like list[X] | None are left untouched because their
+    get_origin is not `list`.
+    """
+    for name, field in model_cls.model_fields.items():
+        if data.get(name) is None:
+            origin = get_origin(field.annotation)
+            if origin is list:
+                data[name] = []
+    return data
+
+
+class CloudConfig(BaseModel):
+    """Cloud connectivity settings."""
+
+    model_config = {"frozen": True}
+
+    api_key: str | None = None
     gateway_url: str = "https://api.hybro.ai"
-    hub_id: str = ""
 
-    agents: list[LocalAgentConfig] = Field(default_factory=list)
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nulls(cls, data: object) -> object:
+        return _coerce_nulls(cls, data) if isinstance(data, dict) else data
+
+
+class AgentsConfig(BaseModel):
+    """Agent discovery settings."""
+
+    model_config = {"frozen": True}
+
+    local: list[LocalAgentConfig] = Field(default_factory=list)
     auto_discover: bool = True
     auto_discover_exclude_ports: list[int] = Field(
         default_factory=lambda: [22, 53, 80, 443, 3306, 5432, 6379, 27017],
@@ -63,20 +94,8 @@ class HubConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _coerce_null_lists(cls, data: object) -> object:
-        """Coerce None → [] for any field annotated as list[...].
-
-        Guards against YAML `key: null` which is parsed as None and bypasses
-        .get(key, default) — the default is only used when the key is absent.
-        Fields typed list[X] | None (e.g. auto_discover_scan_range) are
-        intentionally left alone because their Union origin is not `list`.
-        """
-        if not isinstance(data, dict):
-            return data
-        for name, field in cls.model_fields.items():
-            if data.get(name) is None and get_origin(field.annotation) is list:
-                data[name] = []
-        return data
+    def _coerce_nulls(cls, data: object) -> object:
+        return _coerce_nulls(cls, data) if isinstance(data, dict) else data
 
     @field_validator("auto_discover_scan_range")
     @classmethod
@@ -99,13 +118,55 @@ class HubConfig(BaseModel):
             )
         return v
 
-    privacy_default_routing: str = "local_first"
-    privacy_sensitive_keywords: list[str] = Field(default_factory=list)
-    privacy_sensitive_patterns: list[str] = Field(default_factory=list)
 
+class PrivacyConfig(BaseModel):
+    """Privacy and routing settings."""
+
+    model_config = {"frozen": True}
+
+    sensitive_keywords: list[str] = Field(default_factory=list)
+    sensitive_patterns: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nulls(cls, data: object) -> object:
+        return _coerce_nulls(cls, data) if isinstance(data, dict) else data
+
+
+class HubConfig(BaseModel):
+    """Hub daemon configuration."""
+
+    model_config = {"frozen": True}
+
+    hub_id: str = ""
     heartbeat_interval: int = 30
 
+    cloud: CloudConfig = Field(default_factory=CloudConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     publish_queue: PublishQueueConfig = Field(default_factory=PublishQueueConfig)
+
+
+def _expand_env_vars(text: str) -> str:
+    """Expand ${VAR} and ${VAR:-default} references before YAML parsing.
+
+    Matches the OTel Collector / Grafana Agent convention:
+      ${VAR}           — value of VAR, or "" if unset
+      ${VAR:-default}  — value of VAR, or "default" if unset
+      $${VAR}          — literal ${VAR} (escape)
+
+    LIMITATION: env var values must not contain YAML special characters
+    (#, colon-space, {, }, [, ], |, >) as expansion happens before parsing.
+    """
+    def _replace(m: re.Match) -> str:
+        if m.group(1) is None:
+            # Matched $${ escape branch — strip the leading $ to produce ${...}
+            return m.group(0)[1:]
+        return os.environ.get(m.group(1), m.group(2) if m.group(2) is not None else "")
+
+    # The $${ branch has no capture groups so group(1) is None when it matches,
+    # which distinguishes it from the expansion branch.
+    return re.sub(r'\$\$\{[^}]*\}|\$\{([^}:-]+)(?::-([^}]*))?\}', _replace, text)
 
 
 def load_config(
@@ -125,54 +186,28 @@ def load_config(
 
     if path.exists():
         with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+            raw = yaml.safe_load(_expand_env_vars(f.read())) or {}
         if isinstance(raw, dict):
             data = raw
-            # Flatten nested keys for Pydantic
-            cloud = data.pop("cloud", {}) or {}
-            if "api_key" in cloud:
-                data.setdefault("api_key", cloud["api_key"])
-            if "gateway_url" in cloud:
-                data.setdefault("gateway_url", cloud["gateway_url"])
-            privacy = data.pop("privacy", {}) or {}
-            for k, v in privacy.items():
-                data.setdefault(f"privacy_{k}", v)
-            # Flatten agents.local -> agents
-            agents_section = data.pop("agents", None)
-            if isinstance(agents_section, dict):
-                # Use `or []` to guard against `local: null` in YAML —
-                # .get(key, default) does NOT use the default when the key is
-                # present with a None value, so we need the explicit `or []`.
-                data["agents"] = agents_section.get("local") or []
-                if "auto_discover" in agents_section:
-                    data["auto_discover"] = agents_section["auto_discover"]
-                if "auto_discover_exclude_ports" in agents_section:
-                    data["auto_discover_exclude_ports"] = agents_section[
-                        "auto_discover_exclude_ports"
-                    ]
-                if "auto_discover_scan_range" in agents_section:
-                    data["auto_discover_scan_range"] = agents_section[
-                        "auto_discover_scan_range"
-                    ]
         logger.debug("Loaded config from %s", path)
 
-    # Env var overrides
+    # Env var overrides — inject into the cloud sub-dict so the nested model
+    # picks them up at the right level.
+    cloud = data.setdefault("cloud", {})
     if env_key := os.environ.get("HYBRO_API_KEY"):
-        data["api_key"] = env_key
+        cloud["api_key"] = env_key
     if env_gw := os.environ.get("HYBRO_GATEWAY_URL"):
-        data["gateway_url"] = env_gw
+        cloud["gateway_url"] = env_gw
 
     # CLI arg override
-    if api_key:
-        data["api_key"] = api_key
+    if api_key is not None:
+        cloud["api_key"] = api_key
 
-    config = HubConfig(**data)
+    # Resolve hub_id before construction (model is frozen after)
+    if not data.get("hub_id"):
+        data["hub_id"] = _load_or_create_hub_id()
 
-    # Resolve hub_id
-    if not config.hub_id:
-        config.hub_id = _load_or_create_hub_id()
-
-    return config
+    return HubConfig(**data)
 
 
 def _load_or_create_hub_id() -> str:
@@ -256,6 +291,13 @@ def save_api_key(api_key: str) -> None:
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE) as f:
             data = yaml.safe_load(f) or {}
+    # If the existing value is an env var reference, don't overwrite it —
+    # the user deliberately chose env var wiring and saving a literal key
+    # would silently destroy that setup.
+    existing = data.get("cloud", {}).get("api_key", "")
+    if isinstance(existing, str) and existing.startswith("${"):
+        logger.info("Skipping api_key save — existing value is an env var reference (%s)", existing)
+        return
     data.setdefault("cloud", {})["api_key"] = api_key
     with open(CONFIG_FILE, "w") as f:
         yaml.dump(data, f, default_flow_style=False)

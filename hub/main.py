@@ -39,16 +39,15 @@ class HubDaemon:
     def __init__(self, config: HubConfig) -> None:
         self.config = config
         self.relay = RelayClient(
-            gateway_url=config.gateway_url,
+            gateway_url=config.cloud.gateway_url,
             hub_id=config.hub_id,
-            api_key=config.api_key,
+            api_key=config.cloud.api_key or "",
         )
         self.registry = AgentRegistry(config)
         self.dispatcher = Dispatcher()
         self.privacy = PrivacyRouter(
-            sensitive_keywords=config.privacy_sensitive_keywords,
-            sensitive_patterns=config.privacy_sensitive_patterns,
-            default_routing=config.privacy_default_routing,
+            sensitive_keywords=config.privacy.sensitive_keywords,
+            sensitive_patterns=config.privacy.sensitive_patterns,
         )
         self._shutdown_event = asyncio.Event()
         self._last_sync_payload: list[dict] | None = None

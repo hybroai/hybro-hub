@@ -18,26 +18,26 @@ from hub.agent_registry import (
     _ports_linux,
     _ports_macos,
 )
-from hub.config import HubConfig, LocalAgentConfig
+from hub.config import AgentsConfig, CloudConfig, HubConfig, LocalAgentConfig
 import pydantic
 
 
 @pytest.fixture
 def config():
     return HubConfig(
-        api_key="test",
-        agents=[
-            LocalAgentConfig(name="Test Agent", url="http://localhost:9001"),
-        ],
-        auto_discover=False,
+        cloud=CloudConfig(api_key="test"),
+        agents=AgentsConfig(
+            local=[LocalAgentConfig(name="Test Agent", url="http://localhost:9001")],
+            auto_discover=False,
+        ),
     )
 
 
 @pytest.fixture
 def config_autodiscover():
     return HubConfig(
-        api_key="test",
-        auto_discover=True,
+        cloud=CloudConfig(api_key="test"),
+        agents=AgentsConfig(auto_discover=True),
     )
 
 
@@ -477,23 +477,23 @@ class TestScanRangeValidator:
     """Tests for HubConfig.auto_discover_scan_range validation."""
 
     def _make(self, scan_range):
-        return HubConfig(api_key="test", auto_discover_scan_range=scan_range)
+        return HubConfig(agents=AgentsConfig(auto_discover_scan_range=scan_range))
 
     def test_none_is_valid(self):
         cfg = self._make(None)
-        assert cfg.auto_discover_scan_range is None
+        assert cfg.agents.auto_discover_scan_range is None
 
     def test_valid_range(self):
         cfg = self._make([8000, 9999])
-        assert cfg.auto_discover_scan_range == [8000, 9999]
+        assert cfg.agents.auto_discover_scan_range == [8000, 9999]
 
     def test_equal_start_end_is_valid(self):
         cfg = self._make([9001, 9001])
-        assert cfg.auto_discover_scan_range == [9001, 9001]
+        assert cfg.agents.auto_discover_scan_range == [9001, 9001]
 
     def test_boundary_ports_are_valid(self):
         cfg = self._make([0, 65535])
-        assert cfg.auto_discover_scan_range == [0, 65535]
+        assert cfg.agents.auto_discover_scan_range == [0, 65535]
 
     def test_too_few_elements(self):
         with pytest.raises(pydantic.ValidationError, match="exactly \\[start, end\\]"):

@@ -218,4 +218,3 @@ class TestPublishQueueConfig:
         assert cfg.drain_batch_size == 20
         assert cfg.max_retries_critical == 20
         assert cfg.max_retries_normal == 5
-        assert cfg.max_retries_streaming == 3

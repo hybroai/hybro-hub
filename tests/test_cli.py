@@ -198,22 +198,22 @@ class TestAddFileLogging:
 
 # ── start command ────────────────────────────────────────────────────────────
 
-def _mock_config(api_key: str = "hybro_test_key"):
+def _mock_config(api_key: str | None = "hybro_test_key"):
     """Return a minimal HubConfig-like mock."""
     cfg = MagicMock()
-    cfg.api_key = api_key
+    cfg.cloud.api_key = api_key
     return cfg
 
 
 class TestStartNoApiKey:
     def test_exits_with_error_when_no_api_key(self, runner):
-        with patch("hub.cli.load_config", return_value=_mock_config(api_key="")):
+        with patch("hub.cli.load_config", return_value=_mock_config(api_key=None)):
             result = runner.invoke(main, ["start"])
         assert result.exit_code == 1
         assert "No API key" in result.output or "No API key" in (result.output + str(result.stderr_bytes or ""))
 
     def test_error_message_includes_hint(self, runner):
-        with patch("hub.cli.load_config", return_value=_mock_config(api_key="")):
+        with patch("hub.cli.load_config", return_value=_mock_config(api_key=None)):
             result = runner.invoke(main, ["start"])
         # CliRunner mixes stderr into output by default
         combined = result.output
@@ -464,7 +464,7 @@ class TestStatusNoApiKey:
     def test_shows_local_and_cloud_hint(self, runner, tmp_path, monkeypatch):
         monkeypatch.setattr("hub.cli.LOG_FILE", tmp_path / "hub.log")
         with patch("hub.cli.read_lock_pid", return_value=None), \
-             patch("hub.cli.load_config", return_value=_mock_config(api_key="")):
+             patch("hub.cli.load_config", return_value=_mock_config(api_key=None)):
             result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
         out = result.output.lower()

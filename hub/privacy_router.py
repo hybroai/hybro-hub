@@ -1,6 +1,6 @@
 """Privacy router — sensitivity classification for hub messages.
 
-Phase 2b: logging/warning only. The cloud backend already decides which
+Phase 2b: logging/warning only. The cloud backend decides which
 local agent to target; this router classifies and logs but does NOT
 block or re-route relay-dispatched messages.
 """
@@ -39,14 +39,12 @@ class PrivacyRouter:
         self,
         sensitive_keywords: list[str] | None = None,
         sensitive_patterns: list[str] | None = None,
-        default_routing: str = "local_first",
     ) -> None:
         self._keywords = [k.lower() for k in (sensitive_keywords or [])]
         self._user_patterns = [re.compile(p, re.IGNORECASE) for p in (sensitive_patterns or [])]
         self._builtin_patterns = [
             (re.compile(p, re.IGNORECASE), label) for p, label in _BUILTIN_PATTERNS
         ]
-        self._default_routing = default_routing
 
     def classify(self, text: str) -> SensitivityLevel:
         """Classify text sensitivity.
