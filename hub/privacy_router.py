@@ -1,8 +1,7 @@
 """Privacy router — sensitivity classification for hub messages.
 
-Phase 2b: logging/warning only. The cloud backend decides which
-local agent to target; this router classifies and logs but does NOT
-block or re-route relay-dispatched messages.
+Classifies and logs message sensitivity but does NOT block or re-route
+messages. The cloud backend decides which local agent to target.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ class SensitivityLevel(str, Enum):
 class PrivacyRouter:
     """Classifies message sensitivity and logs the result.
 
-    In Phase 2b, this does NOT gate or re-route messages.
+    Does NOT gate or re-route messages — classification is informational only.
     """
 
     def __init__(
@@ -52,7 +51,7 @@ class PrivacyRouter:
         Returns:
             HIGH if PII or sensitive keywords detected.
             LOW otherwise.
-            MEDIUM is reserved for Phase 3 LLM classification.
+            MEDIUM is reserved for future LLM-based classification.
         """
         lower = text.lower()
 
@@ -88,7 +87,7 @@ class PrivacyRouter:
         if level == SensitivityLevel.HIGH:
             logger.warning(
                 "Message to '%s' classified as HIGH sensitivity. "
-                "In Phase 2b this is logged only — message will still be dispatched.",
+                "Currently logged only — message will still be dispatched.",
                 agent_name,
             )
         else:

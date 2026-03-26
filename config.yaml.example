@@ -23,7 +23,7 @@ cloud:
 
 agents:
   # Automatically probe listening localhost ports for A2A agents.
-  # The hub fetches /.well-known/agent.json from each open port.
+  # The hub probes /.well-known/agent-card.json and /.well-known/agent.json on each port.
   auto_discover: true
 
   # Ports to skip during auto-discovery (databases, system services, etc.)

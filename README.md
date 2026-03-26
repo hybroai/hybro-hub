@@ -141,7 +141,7 @@ The hub scans outbound messages for sensitive content before they reach cloud ag
 - **Custom keywords** — configure terms like "medical", "financial", "confidential"
 - **Custom patterns** — add regex rules for project-specific data (e.g., `PROJ-\d{4}`)
 
-> Phase 2 logs detections. Active blocking and anonymization are on the roadmap.
+> Currently logs detections only. Active blocking and anonymization are planned for a future release.
 
 ---
 
