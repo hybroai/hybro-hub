@@ -1,43 +1,108 @@
 # Hybro Hub Configuration
 # Copy to ~/.hybro/config.yaml and adjust values.
+#
+# Environment variable syntax (expanded before YAML parsing):
+#   ${VAR}           — value of VAR, or "" if unset
+#   ${VAR:-default}  — value of VAR, or "default" if unset
+#   $${VAR}          — literal ${VAR} (escape)
 
-# Cloud connection
+# ── Cloud connection ──────────────────────────────────────────────────────────
+
 cloud:
-  api_key: "hybro_..."                    # Your Hybro API key (or set HYBRO_API_KEY env var)
-  gateway_url: "https://api.hybro.ai"   # Cloud gateway URL
+  # Your Hybro API key. Obtain from https://app.hybro.ai
+  # Option A — paste the key directly:
+  #   api_key: "hybro_your_key_here"
+  # Option B — reference a shell environment variable (recommended):
+  api_key: ${HYBRO_API_KEY}
 
-# Local agent discovery
+  # Cloud gateway URL (change only if self-hosting the relay)
+  gateway_url: "https://api.hybro.ai"
+
+
+# ── Local agent discovery ─────────────────────────────────────────────────────
+
 agents:
-  auto_discover: true                   # Enumerate listening localhost ports and probe for A2A agents
+  # Automatically probe listening localhost ports for A2A agents.
+  # The hub fetches /.well-known/agent.json from each open port.
+  auto_discover: true
 
-  # Ports to skip during auto-discovery (databases, SSH, etc.)
-  # Default excludes: 22, 53, 80, 443, 3306, 5432, 6379, 27017
-  # auto_discover_exclude_ports:
-  #   - 22
-  #   - 3306
+  # Ports to skip during auto-discovery (databases, system services, etc.)
+  # These are the built-in defaults; override the whole list if needed.
+  auto_discover_exclude_ports:
+    - 22      # SSH
+    - 53      # DNS
+    - 80      # HTTP
+    - 443     # HTTPS
+    - 3306    # MySQL
+    - 5432    # PostgreSQL
+    - 6379    # Redis
+    - 27017   # MongoDB
 
-  # Manually-configured agents (always registered, even if auto-discover is off)
-  local:
-    - name: "My Custom Agent"
-      url: "http://localhost:9001"
-    # - name: "Another Agent"
-    #   url: "http://localhost:9002"
+  # Restrict auto-discovery to a specific port range (optional).
+  # When omitted, the full unprivileged range 1024–65535 is scanned.
+  # Useful on machines with many open ports to keep discovery fast.
+  # auto_discover_scan_range: [10000, 11000]
 
-# Privacy settings (Phase 2b: logging only, does not block dispatch)
+  # Manually-configured agents — always registered regardless of auto-discover.
+  # Use this for agents on non-localhost addresses or fixed ports.
+  local: []
+  # local:
+  #   - name: "My Agent"
+  #     url: "http://localhost:9001"
+  #   - name: "Remote Agent"
+  #     url: "http://192.168.1.50:9002"
+
+
+# ── Privacy (sensitivity classification) ──────────────────────────────────────
+#
+# The privacy router classifies message text and logs a warning for HIGH
+# sensitivity content. Classification does NOT block or reroute messages.
+# Built-in patterns detect: email, US phone, SSN, credit card, API keys.
+
 privacy:
-  default_routing: "local_first"
+  # Extra keywords that trigger HIGH sensitivity classification (case-insensitive).
+  sensitive_keywords: []
+  # sensitive_keywords:
+  #   - "medical"
+  #   - "financial"
+  #   - "confidential"
 
-  # Extra keywords that trigger HIGH sensitivity classification
-  sensitive_keywords:
-    - "medical"
-    - "financial"
-    - "confidential"
+  # Extra regex patterns for sensitive data detection.
+  sensitive_patterns: []
+  # sensitive_patterns:
+  #   - "PROJ-\\d{4}"
+  #   - "INTERNAL-\\w+"
 
-  # Extra regex patterns for sensitive data detection
-  # Built-in patterns already detect: email, phone, SSN, credit card, API keys
-  sensitive_patterns:
-    - "PROJ-\\d{4}"
-    # - "INTERNAL-\\w+"
 
-# Heartbeat interval (seconds)
+# ── Publish queue (offline resilience) ───────────────────────────────────────
+#
+# Events that fail immediate delivery are persisted to a SQLite database and
+# retried in the background. All settings below show their default values.
+
+publish_queue:
+  # Set to false to disable the disk queue entirely (events are dropped on failure).
+  enabled: true
+
+  # Maximum disk usage for the queue database.
+  max_size_mb: 50
+
+  # Events older than this are expired and dropped from the queue.
+  ttl_hours: 24
+
+  # Seconds between background drain cycles.
+  drain_interval: 30
+
+  # Maximum events processed per drain cycle.
+  drain_batch_size: 20
+
+  # Retry limits per event category (advanced tuning).
+  # Critical events: agent_response, agent_error, processing_status
+  max_retries_critical: 20
+  # Normal events: task_submitted, artifact_update, task_status
+  max_retries_normal: 5
+
+
+# ── Daemon ────────────────────────────────────────────────────────────────────
+
+# How often (seconds) the hub sends a liveness heartbeat to the relay.
 heartbeat_interval: 30
