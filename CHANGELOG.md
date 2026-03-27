@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.11] - 2026-03-26
+
+### Fixed
+
+- Lock file no longer truncated before flock acquisition: a blocked `hybro-hub start` call would silently erase the running daemon's PID, making `stop` and `status` report "not running" while the daemon was still alive
+
 ## [0.1.10] - 2026-03-26
 
 ### Added

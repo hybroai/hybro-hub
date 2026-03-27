@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hybro-hub"
-version = "0.1.10"
+version = "0.1.11"
 description = "Hybro Hub — daemon and Gateway client for connecting local and cloud A2A agents on hybro.ai."
 readme = "README.md"
 license = "Apache-2.0"
