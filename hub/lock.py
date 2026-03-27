@@ -30,7 +30,11 @@ def acquire_instance_lock() -> IO[Any]:
     Raises SystemExit with a clear message if another instance is already running.
     """
     HYBRO_DIR.mkdir(parents=True, exist_ok=True)
-    lock_fh: IO[Any] = open(LOCK_FILE, "w", encoding="utf-8")  # noqa: SIM115
+    # O_RDWR | O_CREAT: create if absent, but never truncate.
+    # Truncating with "w" before acquiring the flock would silently destroy the
+    # running daemon's PID if a second `hybro-hub start` attempt is blocked.
+    fd = os.open(str(LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
+    lock_fh: IO[Any] = os.fdopen(fd, "r+", encoding="utf-8")
 
     try:
         import fcntl  # Unix only
@@ -63,6 +67,7 @@ def acquire_instance_lock() -> IO[Any]:
 def write_lock_pid(lock_fh: IO[Any]) -> None:
     """Write (or overwrite) the current process's PID into the lock file."""
     lock_fh.seek(0)
+    lock_fh.truncate()
     lock_fh.write(str(os.getpid()))
     lock_fh.flush()
 

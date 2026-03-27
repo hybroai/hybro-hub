@@ -101,6 +101,25 @@ class TestAcquireInstanceLock:
                 hub_lock.acquire_instance_lock()
         assert exc_info.value.code == 1
 
+    def test_failed_lock_does_not_truncate_existing_pid(self, tmp_path, monkeypatch):
+        """Regression: a blocked flock must leave the running daemon's PID intact.
+
+        Before the fix, open(LOCK_FILE, "w") truncated the file before the
+        flock attempt, silently erasing the running daemon's PID and making it
+        invisible to `stop` and `status`.
+        """
+        lock_path = tmp_path / "hub.lock"
+        lock_path.write_text("99999", encoding="utf-8")
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
+        monkeypatch.setattr(hub_config, "HYBRO_DIR", tmp_path)
+
+        import fcntl
+        with patch.object(fcntl, "flock", side_effect=OSError("locked")):
+            with pytest.raises(SystemExit):
+                hub_lock.acquire_instance_lock()
+
+        assert lock_path.read_text(encoding="utf-8").strip() == "99999"
+
     def test_exits_on_windows_lock_failure(self, tmp_path, monkeypatch):
         """Simulate the Windows msvcrt path by removing fcntl from sys.modules."""
         lock_path = tmp_path / "hub.lock"
