@@ -646,3 +646,159 @@ class TestStatusCloudRelay:
         assert result.exit_code == 0
         assert "unreachable" in result.output.lower()
         assert "network down" in result.output.lower()
+
+
+# ── agent start --config ─────────────────────────────────────────────────────
+
+
+class TestAgentStartConfig:
+    """Tests for `agent start --config` and auto-discovery."""
+
+    @pytest.fixture()
+    def _stub_a2a(self):
+        """Stub a2a_adapter so CLI import succeeds without the real package."""
+        mock_adapter = MagicMock()
+        mock_load = MagicMock(return_value=mock_adapter)
+        mock_serve = MagicMock()
+        with patch.dict(
+            "sys.modules",
+            {
+                "a2a_adapter": MagicMock(serve_agent=mock_serve),
+                "a2a_adapter.loader": MagicMock(load_adapter=mock_load),
+            },
+        ):
+            # Patch the names as imported in cli.py
+            with patch("hub.cli.agent_start.__wrapped__", create=True):
+                yield mock_load, mock_serve
+
+    def _invoke_with_config(self, runner, config_content: str, extra_args=None):
+        """Write a temp YAML file and invoke `agent start --config <path>`."""
+        extra_args = extra_args or []
+        mock_adapter = MagicMock()
+        mock_load = MagicMock(return_value=mock_adapter)
+        mock_serve = MagicMock()
+
+        mock_a2a_adapter = MagicMock()
+        mock_a2a_adapter.serve_agent = mock_serve
+        mock_a2a_adapter_loader = MagicMock()
+        mock_a2a_adapter_loader.load_adapter = mock_load
+
+        with runner.isolated_filesystem():
+            with open("agent.yaml", "w", encoding="utf-8") as f:
+                f.write(config_content)
+
+            with patch.dict(
+                "sys.modules",
+                {
+                    "a2a_adapter": mock_a2a_adapter,
+                    "a2a_adapter.loader": mock_a2a_adapter_loader,
+                },
+            ):
+                result = runner.invoke(
+                    main,
+                    ["agent", "start", "--config", "agent.yaml"] + extra_args,
+                )
+        return result, mock_load, mock_serve
+
+    def test_config_file_loads_n8n_adapter(self, runner):
+        yaml_content = (
+            "adapter: n8n\n"
+            "webhook_url: http://localhost:5678/webhook/test\n"
+            "message_field: event\n"
+            "name: Test n8n\n"
+            "port: 10055\n"
+        )
+        result, mock_load, mock_serve = self._invoke_with_config(runner, yaml_content)
+        assert result.exit_code == 0
+        config_passed = mock_load.call_args[0][0]
+        assert config_passed["adapter"] == "n8n"
+        assert config_passed["webhook_url"] == "http://localhost:5678/webhook/test"
+        assert config_passed["message_field"] == "event"
+        mock_serve.assert_called_once()
+
+    def test_config_file_port_used_for_serve(self, runner):
+        yaml_content = "adapter: n8n\nwebhook_url: http://localhost/wh\nport: 10099\n"
+        result, _, mock_serve = self._invoke_with_config(runner, yaml_content)
+        assert result.exit_code == 0
+        assert mock_serve.call_args[1]["port"] == 10099
+
+    def test_cli_port_overrides_config_file(self, runner):
+        yaml_content = "adapter: n8n\nwebhook_url: http://localhost/wh\nport: 10099\n"
+        result, _, mock_serve = self._invoke_with_config(
+            runner, yaml_content, extra_args=["--port", "10200"]
+        )
+        assert result.exit_code == 0
+        assert mock_serve.call_args[1]["port"] == 10200
+
+    def test_config_file_missing_adapter_key_exits(self, runner):
+        yaml_content = "webhook_url: http://localhost/wh\n"
+        result, mock_load, _ = self._invoke_with_config(runner, yaml_content)
+        assert result.exit_code == 1
+        assert "adapter" in result.output.lower() or "adapter" in (result.output + str(result.exception or "")).lower()
+        mock_load.assert_not_called()
+
+    def test_both_adapter_type_and_config_exits(self, runner):
+        mock_adapter = MagicMock()
+        mock_load = MagicMock(return_value=mock_adapter)
+        mock_serve = MagicMock()
+
+        mock_a2a_adapter = MagicMock()
+        mock_a2a_adapter.serve_agent = mock_serve
+        mock_a2a_adapter_loader = MagicMock()
+        mock_a2a_adapter_loader.load_adapter = mock_load
+
+        with runner.isolated_filesystem():
+            with open("agent.yaml", "w", encoding="utf-8") as f:
+                f.write("adapter: n8n\nwebhook_url: http://x\n")
+
+            with patch.dict(
+                "sys.modules",
+                {
+                    "a2a_adapter": mock_a2a_adapter,
+                    "a2a_adapter.loader": mock_a2a_adapter_loader,
+                },
+            ):
+                result = runner.invoke(
+                    main,
+                    ["agent", "start", "n8n", "--config", "agent.yaml"],
+                )
+        assert result.exit_code == 1
+        assert "cannot use both" in result.output.lower()
+
+    def test_no_args_no_discovery_shows_help(self, runner):
+        """With no adapter_type and no --config and no auto-discovery file, prints help."""
+        with runner.isolated_filesystem():
+            result = runner.invoke(main, ["agent", "start"])
+        # exit 0 + help text shown
+        assert result.exit_code == 0
+        assert "usage" in result.output.lower() or "start" in result.output.lower()
+
+    def test_auto_discovery_hybro_agent_yaml(self, runner):
+        """When no args are given and hybro-agent.yaml exists in cwd, it is used."""
+        yaml_content = "adapter: n8n\nwebhook_url: http://localhost/wh\n"
+        mock_adapter = MagicMock()
+        mock_load = MagicMock(return_value=mock_adapter)
+        mock_serve = MagicMock()
+
+        mock_a2a_adapter = MagicMock()
+        mock_a2a_adapter.serve_agent = mock_serve
+        mock_a2a_adapter_loader = MagicMock()
+        mock_a2a_adapter_loader.load_adapter = mock_load
+
+        with runner.isolated_filesystem():
+            with open("hybro-agent.yaml", "w", encoding="utf-8") as f:
+                f.write(yaml_content)
+
+            with patch.dict(
+                "sys.modules",
+                {
+                    "a2a_adapter": mock_a2a_adapter,
+                    "a2a_adapter.loader": mock_a2a_adapter_loader,
+                },
+            ):
+                result = runner.invoke(main, ["agent", "start"])
+
+        assert result.exit_code == 0
+        config_passed = mock_load.call_args[0][0]
+        assert config_passed["adapter"] == "n8n"
+

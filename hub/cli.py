@@ -548,7 +548,10 @@ def _validate_ollama_model(model: str, base_url: str = "http://localhost:11434")
 
 
 @agent.command("start")
-@click.argument("adapter_type", type=click.Choice(sorted(_CLI_ADAPTERS), case_sensitive=False))
+@click.argument("adapter_type", required=False,
+    type=click.Choice(sorted(_CLI_ADAPTERS), case_sensitive=False))
+@click.option("--config", "config_path", default=None, type=click.Path(exists=True),
+    help="Path to a YAML agent config file. Mutually exclusive with adapter_type.")
 @click.option("--port", default=10010, type=int, help="Port for the A2A server.")
 @click.option("--name", "agent_name", default=None, help="Agent display name.")
 @click.option("--model", default=None, help="[ollama] Model name (default: llama3.2).")
@@ -558,8 +561,11 @@ def _validate_ollama_model(model: str, base_url: str = "http://localhost:11434")
 @click.option("--openclaw-path", default=None, help="[openclaw] Path to openclaw binary.")
 @click.option("--webhook-url", default=None, help="[n8n] Webhook URL (required for n8n).")
 @click.option("--timeout", default=None, type=int, help="Request timeout in seconds.")
+@click.pass_context
 def agent_start(
-    adapter_type: str,
+    ctx: click.Context,
+    adapter_type: str | None,
+    config_path: str | None,
     port: int,
     agent_name: str | None,
     model: str | None,
@@ -580,51 +586,94 @@ def agent_start(
       hybro-hub agent start ollama --model mistral:7b --port 10020
       hybro-hub agent start openclaw --thinking medium
       hybro-hub agent start n8n --webhook-url http://localhost:5678/webhook/agent
+      hybro-hub agent start --config hybro-agent.yaml
     """
+    # Mutual-exclusion guard and auto-discovery
+    if config_path and adapter_type:
+        click.echo("Error: Cannot use both --config and an adapter type argument.", err=True)
+        sys.exit(1)
+
+    if not config_path and not adapter_type:
+        for candidate in ("hybro-agent.yaml", ".hybro-agent.yaml"):
+            if os.path.exists(candidate):
+                config_path = candidate
+                break
+        else:
+            click.echo(ctx.get_help())
+            sys.exit(0)
+
+    config: dict
+    adapter_type_display: str
+
+    if config_path:
+        import yaml
+        with open(config_path, encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        if not isinstance(config, dict) or not config.get("adapter"):
+            click.echo(
+                f"Error: Config file missing required key: 'adapter'\n  File: {config_path}",
+                err=True,
+            )
+            sys.exit(1)
+        # CLI flags override config file values
+        if port != 10010:
+            config["port"] = port
+        if agent_name:
+            config["name"] = agent_name
+        if timeout:
+            config["timeout"] = timeout
+        adapter_type_display = config["adapter"]
+        effective_port = config.get("port", port)
+    else:
+        # adapter_type is guaranteed non-None here
+        config = {"adapter": adapter_type}
+        adapter_type_display = adapter_type  # type: ignore[assignment]
+        effective_port = port
+
+        if adapter_type == "ollama":
+            config["model"] = model or "llama3.2"
+            _validate_ollama_model(config["model"])
+            config["name"] = agent_name or f"Ollama ({config['model']})"
+            config["description"] = f"Local LLM via Ollama ({config['model']})"
+            if system_prompt:
+                config["system_prompt"] = system_prompt
+            if timeout:
+                config["timeout"] = timeout
+
+        elif adapter_type == "openclaw":
+            config["name"] = agent_name or "OpenClaw Agent"
+            config["description"] = "OpenClaw AI agent"
+            if thinking:
+                config["thinking"] = thinking
+            if agent_id:
+                config["agent_id"] = agent_id
+            if openclaw_path:
+                config["openclaw_path"] = openclaw_path
+            if timeout:
+                config["timeout"] = timeout
+
+        elif adapter_type == "n8n":
+            if not webhook_url:
+                click.echo("Error: --webhook-url is required for n8n adapter.", err=True)
+                sys.exit(1)
+            config["webhook_url"] = webhook_url
+            config["name"] = agent_name or "n8n Workflow Agent"
+            config["description"] = "n8n workflow agent"
+            if timeout:
+                config["timeout"] = timeout
+
     try:
         from a2a_adapter import serve_agent
         from a2a_adapter.loader import load_adapter
     except ImportError:
+        install_hint = _CLI_ADAPTERS.get(adapter_type_display, {}).get(
+            "install_hint", "pip install a2a-adapter"
+        )
         click.echo(
-            "Error: a2a-adapter package not installed.\n"
-            f"Install with: {_CLI_ADAPTERS[adapter_type]['install_hint']}",
+            f"Error: a2a-adapter package not installed.\nInstall with: {install_hint}",
             err=True,
         )
         sys.exit(1)
-
-    config: dict = {"adapter": adapter_type}
-
-    if adapter_type == "ollama":
-        config["model"] = model or "llama3.2"
-        _validate_ollama_model(config["model"])
-        config["name"] = agent_name or f"Ollama ({config['model']})"
-        config["description"] = f"Local LLM via Ollama ({config['model']})"
-        if system_prompt:
-            config["system_prompt"] = system_prompt
-        if timeout:
-            config["timeout"] = timeout
-
-    elif adapter_type == "openclaw":
-        config["name"] = agent_name or "OpenClaw Agent"
-        config["description"] = "OpenClaw AI agent"
-        if thinking:
-            config["thinking"] = thinking
-        if agent_id:
-            config["agent_id"] = agent_id
-        if openclaw_path:
-            config["openclaw_path"] = openclaw_path
-        if timeout:
-            config["timeout"] = timeout
-
-    elif adapter_type == "n8n":
-        if not webhook_url:
-            click.echo("Error: --webhook-url is required for n8n adapter.", err=True)
-            sys.exit(1)
-        config["webhook_url"] = webhook_url
-        config["name"] = agent_name or "n8n Workflow Agent"
-        config["description"] = "n8n workflow agent"
-        if timeout:
-            config["timeout"] = timeout
 
     try:
         adapter = load_adapter(config)
@@ -635,14 +684,17 @@ def agent_start(
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
-    click.echo(f"\nStarting {adapter_type} adapter on port {port}...")
-    click.echo(f"  Name:    {config.get('name', adapter_type)}")
-    if adapter_type == "ollama":
+    click.echo(f"\nStarting {adapter_type_display} adapter on port {effective_port}...")
+    click.echo(f"  Name:    {config.get('name', adapter_type_display)}")
+    if adapter_type_display == "ollama":
         click.echo(f"  Model:   {config['model']}")
-    elif adapter_type == "openclaw":
+    elif adapter_type_display == "openclaw":
         click.echo(f"  Thinking: {config.get('thinking', 'low')}")
-    elif adapter_type == "n8n":
-        click.echo(f"  Webhook: {webhook_url}")
+    elif adapter_type_display == "n8n":
+        wh = config.get("webhook_url") or webhook_url
+        click.echo(f"  Webhook: {wh}")
+    if config_path:
+        click.echo(f"  Config:  {config_path}")
     click.echo("")
 
-    serve_agent(adapter, port=port)
+    serve_agent(adapter, port=effective_port)
