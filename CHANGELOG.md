@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.14] - 2026-03-27
+
+### Fixed
+
+- `_remove_lock_file` no longer unlinks `hub.lock` when a restarting daemon already holds the file lock: a race window between `acquire_instance_lock()` (flock acquired) and `write_lock_pid()` (PID written) allowed `stop` to delete the lock file while the new daemon's flock was active on it, leaving the daemon holding a lock on an unlinked inode and letting a subsequent `start` bypass singleton protection. Fix: attempt `flock(LOCK_EX|LOCK_NB)` before unlinking; abort if the lock is held. Windows falls back to PID-only check.
+- `hybro-hub status` orphan repair hint changed from the unsafe `echo <pid> > hub.lock` (which creates a new inode with no flock, breaking singleton enforcement) to `kill <pid> && hybro-hub start`
+
 ## [0.1.13] - 2026-03-26
 
 ### Changed
