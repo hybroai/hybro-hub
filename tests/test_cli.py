@@ -32,7 +32,7 @@ for _mod in [
 
 from hub import config as hub_config  # noqa: E402
 from hub import lock as hub_lock  # noqa: E402
-from hub.cli import _ENV_DAEMON_CHILD, _add_file_logging, _remove_lock_file, main  # noqa: E402
+from hub.cli import _ENV_DAEMON_CHILD, _add_file_logging, _find_orphan_daemon, _remove_lock_file, main  # noqa: E402
 from hub.lock import LOCK_FILE, LOG_FILE, read_lock_pid, write_lock_pid  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -68,12 +68,93 @@ class TestRemoveLockFile:
         lock_path.write_text("12345", encoding="utf-8")
         monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
         monkeypatch.setattr("hub.cli.LOCK_FILE", lock_path)
-        _remove_lock_file()
+        import fcntl
+        with patch.object(fcntl, "flock"):  # flock succeeds (no-op)
+            _remove_lock_file(12345)
         assert not lock_path.exists()
 
     def test_is_silent_when_file_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr("hub.cli.LOCK_FILE", tmp_path / "no_such_file.lock")
-        _remove_lock_file()  # must not raise
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", tmp_path / "no_such_file.lock")
+        _remove_lock_file(0)  # os.open raises FileNotFoundError — must not raise
+
+    def test_does_not_delete_when_new_daemon_owns_lock(self, tmp_path, monkeypatch):
+        """Race condition: new daemon holds flock but already wrote its PID."""
+        lock_path = tmp_path / "hub.lock"
+        lock_path.write_text("99999", encoding="utf-8")  # new daemon's PID
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
+        monkeypatch.setattr("hub.cli.LOCK_FILE", lock_path)
+        import fcntl
+        with patch.object(fcntl, "flock"):  # flock succeeds; PID check is the guard
+            _remove_lock_file(stopped_pid=12345)  # we stopped PID 12345
+        assert lock_path.exists()
+        assert lock_path.read_text(encoding="utf-8").strip() == "99999"
+
+    def test_does_not_delete_when_flock_fails(self, tmp_path, monkeypatch):
+        """New daemon holds LOCK_EX — we cannot acquire; must leave the file alone.
+
+        This is the core of the flock-before-unlink fix: covers the race window
+        between acquire_instance_lock() and write_lock_pid() where the file still
+        holds the old PID but the new daemon already owns the flock.
+        """
+        lock_path = tmp_path / "hub.lock"
+        lock_path.write_text("12345", encoding="utf-8")  # old PID still in file
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
+        monkeypatch.setattr("hub.cli.LOCK_FILE", lock_path)
+        import fcntl
+        with patch.object(fcntl, "flock", side_effect=OSError("would block")):
+            _remove_lock_file(stopped_pid=12345)
+        assert lock_path.exists(), "Must not delete when new daemon holds the flock"
+
+    def test_windows_pid_only_fallback_deletes(self, tmp_path, monkeypatch):
+        """Windows path: no fcntl, falls back to PID-only check and deletes."""
+        lock_path = tmp_path / "hub.lock"
+        lock_path.write_text("12345", encoding="utf-8")
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
+        monkeypatch.setattr("hub.cli.LOCK_FILE", lock_path)
+        with patch.dict(sys.modules, {"fcntl": None}):
+            _remove_lock_file(stopped_pid=12345)
+        assert not lock_path.exists()
+
+    def test_windows_pid_only_fallback_no_delete_on_mismatch(self, tmp_path, monkeypatch):
+        """Windows path: PID mismatch → file survives."""
+        lock_path = tmp_path / "hub.lock"
+        lock_path.write_text("99999", encoding="utf-8")  # new daemon's PID
+        monkeypatch.setattr(hub_lock, "LOCK_FILE", lock_path)
+        monkeypatch.setattr("hub.cli.LOCK_FILE", lock_path)
+        with patch.dict(sys.modules, {"fcntl": None}):
+            _remove_lock_file(stopped_pid=12345)
+        assert lock_path.exists()
+        assert lock_path.read_text(encoding="utf-8").strip() == "99999"
+
+
+# ── _find_orphan_daemon ───────────────────────────────────────────────────────
+
+
+class TestFindOrphanDaemon:
+    def _make_mock_proc(self, pid: int, cmdline: list[str]):
+        proc = MagicMock()
+        proc.info = {"pid": pid, "cmdline": cmdline}
+        return proc
+
+    def test_finds_hub_start_process(self):
+        mock_proc = self._make_mock_proc(27599, ["/usr/bin/python3", "/usr/bin/hybro-hub", "start"])
+        with patch("psutil.process_iter", return_value=[mock_proc]):
+            from hub.cli import _find_orphan_daemon
+            assert _find_orphan_daemon() == 27599
+
+    def test_finds_hub_start_with_flags(self):
+        mock_proc = self._make_mock_proc(27599, ["/usr/bin/python3", "/usr/bin/hybro-hub", "start", "--foreground"])
+        with patch("psutil.process_iter", return_value=[mock_proc]):
+            from hub.cli import _find_orphan_daemon
+            assert _find_orphan_daemon() == 27599
+
+    def test_ignores_agent_subprocesses(self):
+        """hybro-hub agent start <adapter> must not be treated as an orphan daemon."""
+        mock_proc = self._make_mock_proc(6053, ["/usr/bin/python3", "/usr/bin/hybro-hub", "agent", "start", "openclaw", "--port", "10020"])
+        with patch("psutil.process_iter", return_value=[mock_proc]):
+            from hub.cli import _find_orphan_daemon
+            assert _find_orphan_daemon() is None
 
 
 # ── Instance lock (lock.py) ────────────────────────────────────────────────────
@@ -223,6 +304,25 @@ def _mock_config(api_key: str | None = "hybro_test_key"):
     cfg = MagicMock()
     cfg.cloud.api_key = api_key
     return cfg
+
+
+def _mock_registry(agents=None):
+    """Return a mock AgentRegistry that returns *agents* from discover()."""
+    from hub.agent_registry import LocalAgent
+
+    if agents is None:
+        agents = []
+    registry = MagicMock()
+    registry.discover = AsyncMock(return_value=agents)
+    registry.close = AsyncMock()
+    return registry
+
+
+def _make_agent(name="TestAgent", url="http://localhost:9000", healthy=True):
+    """Construct a minimal LocalAgent for tests."""
+    from hub.agent_registry import LocalAgent
+
+    return LocalAgent(local_agent_id=f"id-{name}", name=name, url=url, healthy=healthy)
 
 
 class TestStartNoApiKey:
@@ -436,7 +536,7 @@ class TestStopGracefulShutdown:
             result = runner.invoke(main, ["stop"])
 
         mock_proc.send_signal.assert_called_once_with(signal.SIGTERM)
-        mock_rm.assert_called_once()
+        mock_rm.assert_called_once_with(42)
         assert "stopped" in result.output.lower()
         assert result.exit_code == 0
 
@@ -451,7 +551,7 @@ class TestStopGracefulShutdown:
             result = runner.invoke(main, ["stop"])
 
         mock_proc.kill.assert_called_once()
-        mock_rm.assert_called_once()
+        mock_rm.assert_called_once_with(42)
         assert "killed" in result.output.lower() or "force" in result.output.lower()
 
     def test_kill_tolerates_process_already_gone(self, runner):
@@ -484,7 +584,8 @@ class TestStatusNoApiKey:
     def test_shows_local_and_cloud_hint(self, runner, tmp_path, monkeypatch):
         monkeypatch.setattr("hub.cli.LOG_FILE", tmp_path / "hub.log")
         with patch("hub.cli.read_lock_pid", return_value=None), \
-             patch("hub.cli.load_config", return_value=_mock_config(api_key=None)):
+             patch("hub.cli.load_config", return_value=_mock_config(api_key=None)), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()):
             result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
         out = result.output.lower()
@@ -502,7 +603,12 @@ class TestStatusLocalDaemon:
 
         with patch("hub.cli.read_lock_pid", return_value=4242), \
              patch("psutil.Process", return_value=mock_proc), \
-             patch("hub.cli.load_config", return_value=_mock_config()):
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
+             patch("hub.cli.RelayClient", return_value=MagicMock(
+                 get_status=AsyncMock(return_value={"hubs": []}),
+                 close=AsyncMock(),
+             )):
             result = runner.invoke(main, ["status"])
 
         assert result.exit_code == 0
@@ -518,6 +624,7 @@ class TestStatusLocalDaemon:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -537,6 +644,7 @@ class TestStatusLocalDaemon:
         with patch("hub.cli.read_lock_pid", return_value=999), \
              patch("psutil.Process", return_value=mock_proc), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -555,12 +663,36 @@ class TestStatusLocalDaemon:
         with patch("hub.cli.read_lock_pid", return_value=888), \
              patch("psutil.Process", side_effect=psutil.NoSuchProcess(888)), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
         assert result.exit_code == 0
         assert "stopped" in result.output.lower()
         assert "stale" in result.output.lower()
+
+    def test_status_warns_when_lock_missing_but_process_running(self, runner, monkeypatch):
+        """When hub.lock is absent but a hybro-hub process exists, show a repair hint."""
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli._find_orphan_daemon", return_value=27599), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "stopped" in result.output.lower()
+        assert "warning" in result.output.lower()
+        assert "27599" in result.output
+        # Repair hint must be the safe kill+restart form, not the unsafe echo form.
+        assert "kill 27599" in result.output
+        assert "hybro-hub start" in result.output
+        assert "echo" not in result.output
 
 
 class TestStatusCloudRelay:
@@ -572,6 +704,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -599,6 +732,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -608,6 +742,7 @@ class TestStatusCloudRelay:
         assert "5" in result.output
         assert "3" in result.output
         assert "2" in result.output
+        assert "may lag" in result.output.lower()
 
     def test_http_401_message(self, runner, monkeypatch):
         monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
@@ -617,6 +752,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -631,6 +767,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -645,6 +782,7 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
@@ -659,12 +797,74 @@ class TestStatusCloudRelay:
 
         with patch("hub.cli.read_lock_pid", return_value=None), \
              patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry()), \
              patch("hub.cli.RelayClient", return_value=relay):
             result = runner.invoke(main, ["status"])
 
         assert result.exit_code == 0
         assert "unreachable" in result.output.lower()
         assert "network down" in result.output.lower()
+
+
+class TestStatusLocalAgents:
+    """Tests for the local agent scan section in hybro-hub status."""
+
+    def test_shows_none_found_when_no_agents(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry(agents=[])), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "none found" in result.output.lower()
+
+    def test_shows_agent_count_and_health(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        agents = [
+            _make_agent("AgentA", "http://localhost:9001", healthy=True),
+            _make_agent("AgentB", "http://localhost:9002", healthy=False),
+        ]
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=_mock_registry(agents=agents)), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        out = result.output
+        assert "2" in out            # 2 found
+        assert "1" in out            # 1 healthy
+        assert "AgentA" in out
+        assert "AgentB" in out
+
+    def test_local_scan_error_is_graceful(self, runner, monkeypatch):
+        monkeypatch.setattr("hub.cli.LOG_FILE", Path("/tmp/hub.log"))
+        relay = MagicMock()
+        relay.get_status = AsyncMock(return_value={"hubs": []})
+        relay.close = AsyncMock()
+
+        broken_registry = MagicMock()
+        broken_registry.discover = AsyncMock(side_effect=RuntimeError("scan failed"))
+        broken_registry.close = AsyncMock()
+
+        with patch("hub.cli.read_lock_pid", return_value=None), \
+             patch("hub.cli.load_config", return_value=_mock_config()), \
+             patch("hub.agent_registry.AgentRegistry", return_value=broken_registry), \
+             patch("hub.cli.RelayClient", return_value=relay):
+            result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "error" in result.output.lower()
 
 
 # ── agent start --config ─────────────────────────────────────────────────────
