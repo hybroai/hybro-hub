@@ -188,6 +188,7 @@ class HubConfig(BaseModel):
 
     hub_id: str = ""
     heartbeat_interval: int = 30
+    dispatcher_read_timeout_secs: int = 300
 
     cloud: CloudConfig = Field(default_factory=CloudConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)

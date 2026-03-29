@@ -7,6 +7,7 @@ the relay client to publish back.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 TERMINAL_FAILURE_STATES = {"failed", "rejected"}
 INTERACTIVE_STATES = {"input-required", "auth-required"}
 TERMINAL_STATES = {"completed", "failed", "canceled", "rejected"}
+NON_TERMINAL_STATES = {"submitted", "working"}
+
+POLL_REQUEST_TIMEOUT = 15.0  # seconds; short timeout per tasks/get poll request
 
 
 class DispatchEvent:
@@ -56,15 +60,37 @@ class DispatchResult:
 
 
 class Dispatcher:
-    """Dispatches A2A messages to local agents."""
+    """Dispatches A2A messages to local agents.
 
-    def __init__(self, timeout: int = 120) -> None:
-        self._timeout = timeout
+    Currently supports two dispatch strategies: streaming (SSE via
+    message/stream) and sync (blocking message/send with polling fallback).
+    Both assume tasks complete within minutes.
+
+    TODO(long-running): For tasks lasting hours, this architecture needs:
+      1. Exponential backoff in _poll_until_terminal (replace fixed interval
+         with min/max/multiplier, e.g. 2s→4s→8s...cap 60s).
+      2. Per-agent dispatch strategy based on agent_card capabilities
+         (e.g. skip blocking=True for agents declaring longRunning).
+      3. Persist in-flight (task_id, agent_url, agent_message_id) to the
+         publish queue DB so polling survives hub daemon restarts.
+      4. Yield intermediate task_status events during polling so the UI
+         shows progress for long waits.
+    """
+
+    def __init__(self, timeout: int = 300) -> None:
+        self._read_timeout = timeout
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self._timeout)
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=10.0,
+                    read=self._read_timeout,
+                    write=30.0,
+                    pool=5.0,
+                )
+            )
         return self._client
 
     async def close(self) -> None:
@@ -94,6 +120,9 @@ class Dispatcher:
         result = DispatchResult()
 
         try:
+            # TODO(long-running): Check agent_card for a longRunning capability
+            # and route to a non-blocking dispatch + polling strategy that skips
+            # blocking=True and uses exponential backoff with generous limits.
             if agent.agent_card.get("capabilities", {}).get("streaming"):
                 async for event in self._dispatch_streaming(agent, message_dict, agent_message_id):
                     ev_dict = event.to_publish_dict()
@@ -113,6 +142,8 @@ class Dispatcher:
                     result = await self._refetch_final_task(agent, result)
             else:
                 result = await self._dispatch_sync(agent, message_dict)
+                if result.task_state in NON_TERMINAL_STATES and result.task_id:
+                    result = await self._poll_until_terminal(agent, result)
         except Exception as exc:
             logger.error("Dispatch to %s failed: %s", agent.name, exc, exc_info=True)
             result.error = str(exc) or repr(exc) or "Unknown dispatch error"
@@ -224,6 +255,39 @@ class Dispatcher:
 
     # ──── Sync dispatch (message/send) ────
 
+    async def _fetch_task(
+        self, agent: LocalAgent, task_id: str,
+        timeout: float | None = None,
+    ) -> dict:
+        """Fetch a task by ID via tasks/get JSON-RPC call.
+
+        Returns the task dict (unwrapped from the JSON-RPC envelope).
+        Raises on network or HTTP errors.
+
+        Args:
+            timeout: Per-request read timeout in seconds.  When ``None``,
+                the client's default (``self._read_timeout``) is used.
+        """
+        client = await self._get_client()
+        body = {
+            "jsonrpc": "2.0",
+            "id": uuid4().hex,
+            "method": "tasks/get",
+            "params": {"id": task_id},
+        }
+        kwargs: dict[str, Any] = {
+            "json": body,
+            "headers": {"Content-Type": "application/json"},
+        }
+        if timeout is not None:
+            kwargs["timeout"] = httpx.Timeout(
+                connect=10.0, read=timeout, write=30.0, pool=5.0,
+            )
+        resp = await client.post(agent.url, **kwargs)
+        resp.raise_for_status()
+        raw = resp.json()
+        return raw.get("result", raw)
+
     async def _refetch_final_task(
         self, agent: LocalAgent, result: DispatchResult,
     ) -> DispatchResult:
@@ -237,20 +301,7 @@ class Dispatcher:
             result.task_id, agent.name,
         )
         try:
-            client = await self._get_client()
-            body = {
-                "jsonrpc": "2.0",
-                "id": uuid4().hex,
-                "method": "tasks/get",
-                "params": {"id": result.task_id},
-            }
-            resp = await client.post(
-                agent.url, json=body,
-                headers={"Content-Type": "application/json"},
-            )
-            resp.raise_for_status()
-            raw = resp.json()
-            task_data = raw.get("result", raw)
+            task_data = await self._fetch_task(agent, result.task_id)
 
             text, non_text = self._collect_parts_from_task(task_data)
             if text:
@@ -269,9 +320,86 @@ class Dispatcher:
             )
         return result
 
+    async def _poll_until_terminal(
+        self,
+        agent: LocalAgent,
+        result: DispatchResult,
+        poll_interval: float = 2.0,
+        max_attempts: int = 30,
+    ) -> DispatchResult:
+        """Poll tasks/get until the task reaches a terminal or interactive state.
+
+        Called when a sync message/send with blocking=True still returns a
+        non-terminal state (submitted/working), indicating the agent ignored
+        the blocking hint.  Polls up to *max_attempts* times with
+        *poll_interval* seconds between each attempt.
+
+        TODO(long-running): Replace fixed poll_interval with exponential
+        backoff (e.g. min_interval=2, max_interval=60, multiplier=2) and
+        make max_attempts configurable via HubConfig for long-running agents.
+        """
+        logger.info(
+            "Sync dispatch returned non-terminal state '%s' — polling task %s on %s",
+            result.task_state, result.task_id, agent.name,
+        )
+
+        for attempt in range(max_attempts):
+            await asyncio.sleep(poll_interval)
+
+            task_data = await self._fetch_task(
+                agent, result.task_id, timeout=POLL_REQUEST_TIMEOUT,
+            )
+
+            state = task_data.get("status", {}).get("state")
+            if state:
+                result.task_state = state
+
+            text, non_text = self._collect_parts_from_task(task_data)
+            if text:
+                result.artifact_text = text
+                result.text = text
+            if non_text:
+                result.raw_parts = non_text
+
+            result.context_id = (
+                task_data.get("contextId", task_data.get("context_id"))
+                or result.context_id
+            )
+
+            if result.task_state in TERMINAL_STATES | INTERACTIVE_STATES:
+                logger.info(
+                    "Polling task %s reached state '%s' after %d attempt(s)",
+                    result.task_id, result.task_state, attempt + 1,
+                )
+                break
+        else:
+            logger.error(
+                "Polling task %s on %s exhausted %d attempts (still '%s')",
+                result.task_id, agent.name, max_attempts, result.task_state,
+            )
+            result.error = (
+                f"Agent task {result.task_id} did not reach a terminal state "
+                f"within {max_attempts} polling attempts"
+            )
+            result.error_type = "PollingTimeout"
+
+        return result
+
     async def _dispatch_sync(self, agent: LocalAgent, message_dict: dict) -> DispatchResult:
-        """Send a synchronous A2A message/send request."""
-        request_body = self._build_jsonrpc(message_dict, method="message/send")
+        """Send a synchronous A2A message/send request with blocking=True.
+
+        Non-streaming agents may take a long time to respond.  Sending
+        ``blocking=True`` asks the agent to hold the HTTP connection and return
+        the result directly, avoiding a push-notification round-trip that would
+        require a reachable webhook URL.
+
+        TODO(long-running): For agents with estimated execution times beyond
+        the read timeout, send blocking=False and rely entirely on polling
+        via _poll_until_terminal. This avoids tying up an HTTP connection
+        for the full duration and is more resilient to network interruptions.
+        """
+        configuration: dict[str, Any] = {"blocking": True}
+        request_body = self._build_jsonrpc(message_dict, method="message/send", configuration=configuration)
         client = await self._get_client()
 
         resp = await client.post(
@@ -379,15 +507,28 @@ class Dispatcher:
     # ──── JSON-RPC construction ────
 
     @staticmethod
-    def _build_jsonrpc(message_dict: dict, method: str) -> dict:
-        """Build a JSON-RPC 2.0 envelope for an A2A message."""
+    def _build_jsonrpc(
+        message_dict: dict,
+        method: str,
+        configuration: dict[str, Any] | None = None,
+    ) -> dict:
+        """Build a JSON-RPC 2.0 envelope for an A2A message.
+
+        Args:
+            message_dict: The A2A Message payload.
+            method: JSON-RPC method name (e.g. ``"message/send"``).
+            configuration: Optional ``MessageSendConfiguration`` fields to
+                include in ``params.configuration``.  Streaming calls omit
+                this; sync calls pass ``{"blocking": True}``.
+        """
+        params: dict[str, Any] = {"message": message_dict}
+        if configuration:
+            params["configuration"] = configuration
         return {
             "jsonrpc": "2.0",
             "id": uuid4().hex,
             "method": method,
-            "params": {
-                "message": message_dict,
-            },
+            "params": params,
         }
 
     # ──── Response extraction ────

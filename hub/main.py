@@ -45,7 +45,7 @@ class HubDaemon:
             api_key=config.cloud.api_key or "",
         )
         self.registry = AgentRegistry(config)
-        self.dispatcher = Dispatcher()
+        self.dispatcher = Dispatcher(timeout=config.dispatcher_read_timeout_secs)
         self.privacy = PrivacyRouter(
             sensitive_keywords=config.privacy.sensitive_keywords,
             sensitive_patterns=config.privacy.sensitive_patterns,

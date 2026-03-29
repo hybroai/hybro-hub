@@ -124,6 +124,133 @@ class TestDispatchSync:
         assert events[1]["type"] == "processing_status"
         assert events[1]["data"]["status"] == "failed"
 
+    @pytest.mark.asyncio
+    async def test_dispatch_sync_nonterminal_polls_to_completed(self, agent, monkeypatch):
+        """When message/send returns a non-terminal state, polling drives to completion."""
+        import hub.dispatcher as dispatcher_mod
+
+        dispatcher = Dispatcher()
+
+        sync_resp = MagicMock()
+        sync_resp.status_code = 200
+        sync_resp.raise_for_status = MagicMock()
+        sync_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "kind": "task",
+                "id": "task-poll-1",
+                "status": {"state": "submitted"},
+            },
+        }
+
+        poll_resp = MagicMock()
+        poll_resp.status_code = 200
+        poll_resp.raise_for_status = MagicMock()
+        poll_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "result": {
+                "kind": "task",
+                "id": "task-poll-1",
+                "status": {
+                    "state": "completed",
+                    "message": {
+                        "role": "agent",
+                        "parts": [{"text": "Polled result"}],
+                    },
+                },
+            },
+        }
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = AsyncMock(side_effect=[sync_resp, poll_resp])
+        dispatcher._client = mock_client
+
+        original_poll = dispatcher_mod.Dispatcher._poll_until_terminal
+
+        async def fast_poll(self, agent, result, **kwargs):
+            return await original_poll(self, agent, result, poll_interval=0, max_attempts=3)
+
+        monkeypatch.setattr(dispatcher_mod.Dispatcher, "_poll_until_terminal", fast_poll)
+
+        events = []
+        async for batch in dispatcher.dispatch(
+            agent=agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-poll-001",
+            user_message_id="um-poll-001",
+        ):
+            events.extend(batch)
+
+        assert events[0]["type"] == "agent_response"
+        assert events[0]["data"]["content"] == "Polled result"
+        assert events[1]["type"] == "processing_status"
+        assert events[1]["data"]["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_sync_polling_exhausted(self, agent, monkeypatch):
+        """When polling never reaches a terminal state, emit agent_error."""
+        import hub.dispatcher as dispatcher_mod
+
+        dispatcher = Dispatcher()
+
+        sync_resp = MagicMock()
+        sync_resp.status_code = 200
+        sync_resp.raise_for_status = MagicMock()
+        sync_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "kind": "task",
+                "id": "task-poll-stuck",
+                "status": {"state": "working"},
+            },
+        }
+
+        still_working_resp = MagicMock()
+        still_working_resp.status_code = 200
+        still_working_resp.raise_for_status = MagicMock()
+        still_working_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "result": {
+                "kind": "task",
+                "id": "task-poll-stuck",
+                "status": {"state": "working"},
+            },
+        }
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = AsyncMock(
+            side_effect=[sync_resp] + [still_working_resp] * 3,
+        )
+        dispatcher._client = mock_client
+
+        original_poll = dispatcher_mod.Dispatcher._poll_until_terminal
+
+        async def fast_poll(self, agent, result, **kwargs):
+            return await original_poll(self, agent, result, poll_interval=0, max_attempts=3)
+
+        monkeypatch.setattr(dispatcher_mod.Dispatcher, "_poll_until_terminal", fast_poll)
+
+        events = []
+        async for batch in dispatcher.dispatch(
+            agent=agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-poll-002",
+            user_message_id="um-poll-002",
+        ):
+            events.extend(batch)
+
+        assert events[0]["type"] == "agent_error"
+        assert "PollingTimeout" in events[0]["data"]["error_type"]
+        assert "task-poll-stuck" in events[0]["data"]["error"]
+        assert events[1]["type"] == "processing_status"
+        assert events[1]["data"]["status"] == "failed"
+
 
 class TestJsonRpcBuild:
     def test_build_jsonrpc(self):
@@ -549,3 +676,118 @@ class TestDispatchStreaming:
         streaming_events = [ev for b in batches[:-1] for ev in b]
         artifact_updates = [e for e in streaming_events if e["type"] == "artifact_update"]
         assert len(artifact_updates) == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix B — _build_jsonrpc and _dispatch_sync blocking=True
+# ---------------------------------------------------------------------------
+
+
+class TestBuildJsonRpc:
+    def test_no_configuration_omits_params_key(self):
+        """Without configuration, params only contains 'message'."""
+        from hub.dispatcher import Dispatcher
+
+        result = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "message/send")
+        assert "configuration" not in result["params"]
+        assert result["params"]["message"] is SAMPLE_MESSAGE
+        assert result["method"] == "message/send"
+
+    def test_with_configuration_included_in_params(self):
+        """With configuration dict, params['configuration'] is present."""
+        from hub.dispatcher import Dispatcher
+
+        cfg = {"blocking": True}
+        result = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "message/send", configuration=cfg)
+        assert result["params"]["configuration"] == {"blocking": True}
+        assert result["params"]["message"] is SAMPLE_MESSAGE
+
+    def test_streaming_call_omits_configuration(self):
+        """_dispatch_streaming calls _build_jsonrpc without configuration."""
+        from hub.dispatcher import Dispatcher
+
+        result = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "message/stream")
+        assert "configuration" not in result["params"]
+        assert result["method"] == "message/stream"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_sync_sends_blocking_true(self, agent):
+        """Non-streaming dispatch must include blocking=True in the JSON-RPC params."""
+        from hub.dispatcher import Dispatcher
+
+        sent_body = {}
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "kind": "message",
+                "parts": [{"text": "blocking response"}],
+            },
+        }
+
+        async def fake_post(url, *, json, headers):
+            sent_body.update(json)
+            return mock_resp
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = fake_post
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        events = []
+        async for batch in dispatcher.dispatch(
+            agent=agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-block-001",
+            user_message_id="um-block-001",
+        ):
+            events.extend(batch)
+
+        assert sent_body["params"]["configuration"]["blocking"] is True
+        assert events[0]["type"] == "agent_response"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_streaming_does_not_send_blocking(self, streaming_agent):
+        """Streaming dispatch must NOT include blocking in the JSON-RPC params."""
+        import hub.dispatcher as dispatcher_mod
+        from hub.dispatcher import Dispatcher
+
+        sent_body = {}
+
+        @asynccontextmanager
+        async def fake_sse(client, method, url, *, json, headers):
+            sent_body.update(json)
+
+            class _FakeEventSource:
+                async def aiter_sse(self):
+                    sse = MagicMock()
+                    sse.data = '{"result": {"kind": "status-update", "status": {"state": "completed"}, "final": true}}'
+                    yield sse
+
+            yield _FakeEventSource()
+
+        original = dispatcher_mod.aconnect_sse
+        dispatcher_mod.aconnect_sse = fake_sse
+        try:
+            dispatcher = Dispatcher()
+            mock_client = AsyncMock()
+            mock_client.is_closed = False
+            dispatcher._client = mock_client
+
+            batches = []
+            async for batch in dispatcher.dispatch(
+                agent=streaming_agent,
+                message_dict=SAMPLE_MESSAGE,
+                agent_message_id="am-stream-block",
+                user_message_id="um-stream-block",
+            ):
+                batches.append(batch)
+        finally:
+            dispatcher_mod.aconnect_sse = original
+
+        assert "configuration" not in sent_body.get("params", {})
