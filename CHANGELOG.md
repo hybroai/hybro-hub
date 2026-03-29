@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.15] - 2026-03-29
+
+### Fixed
+
+- Sync dispatch now sends `blocking=True` in `MessageSendConfiguration` so non-streaming agents hold the connection and return results directly, removing the need for a reachable webhook callback URL
+- When an agent ignores the blocking hint and returns a non-terminal state (`submitted`/`working`), the dispatcher polls `tasks/get` until the task completes (2 s interval, 30 attempts) instead of silently dropping the response
+
+### Changed
+
+- Split httpx timeout into per-phase budgets (connect 10 s, read 300 s, write 30 s, pool 5 s); read timeout is configurable via `dispatcher_read_timeout_secs` in `config.yaml`
+- Poll requests use a short 15 s read timeout (`POLL_REQUEST_TIMEOUT`) to cap liveness impact when agents become unreachable mid-poll
+- Extract `_fetch_task` helper, deduplicating `tasks/get` calls between `_refetch_final_task` and `_poll_until_terminal`
+- `_build_jsonrpc` accepts an optional `configuration` dict; only included in params when provided — streaming calls stay unchanged
+
 ## [0.1.14] - 2026-03-27
 
 ### Fixed
