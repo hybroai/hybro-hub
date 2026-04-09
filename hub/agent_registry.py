@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse, urlunparse
 
 import httpx
+from a2a.types import AgentCard
 from a2a.utils.constants import (
     AGENT_CARD_WELL_KNOWN_PATH,
     PREV_AGENT_CARD_WELL_KNOWN_PATH,
@@ -203,13 +204,19 @@ class AgentRegistry:
     # ──── Agent card fetch ────
 
     async def _fetch_agent_card(self, url: str, source: str = "config") -> dict | None:
-        """Try each well-known agent card path and return the first valid card."""
+        """Try each well-known agent card path and return the first valid card.
+
+        Validates the response with AgentCard.model_validate() to reject
+        non-agent HTTP 200 responses (e.g. error JSON from unrelated servers).
+        """
         client = await self._get_client()
         for path in AGENT_CARD_PATHS:
             try:
                 resp = await client.get(f"{url}{path}")
                 if resp.status_code == 200:
-                    return resp.json()
+                    card_data = resp.json()
+                    AgentCard.model_validate(card_data)
+                    return card_data
             except Exception:
                 continue
         if source == "config":

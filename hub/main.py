@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import signal
 from typing import Any
 from uuid import uuid4
@@ -424,12 +425,17 @@ class HubDaemon:
                 logger.exception("Agent re-sync failed")
 
     async def _heartbeat_loop(self) -> None:
+        interval = self.config.heartbeat_interval
+        max_interval = 300  # 5 minutes cap
         while not self._shutdown_event.is_set():
-            await asyncio.sleep(self.config.heartbeat_interval)
+            await asyncio.sleep(interval)
             try:
                 await self.relay.heartbeat()
+                interval = self.config.heartbeat_interval
             except Exception:
-                logger.debug("Heartbeat failed (will retry next cycle)", exc_info=True)
+                logger.warning("Heartbeat failed (will retry with backoff)", exc_info=True)
+                interval = min(interval * 2, max_interval)
+                interval *= 0.5 + random.random()
 
     async def _sync_agents(self) -> None:
         payload = self.registry.to_sync_payload()

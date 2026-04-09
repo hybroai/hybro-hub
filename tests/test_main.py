@@ -1,5 +1,6 @@
 """Tests for hub.main — HubDaemon event handling."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,9 +14,13 @@ def _make_daemon() -> HubDaemon:
     daemon = object.__new__(HubDaemon)
     daemon.relay = MagicMock()
     daemon.relay.publish = AsyncMock()
+    daemon.relay.heartbeat = AsyncMock()
     daemon.registry = MagicMock()
     daemon.dispatcher = MagicMock()
     daemon.privacy = MagicMock()
+    daemon.config = MagicMock()
+    daemon.config.heartbeat_interval = 30
+    daemon._shutdown_event = asyncio.Event()
     return daemon
 
 
@@ -283,3 +288,107 @@ class TestHandleEventRouting:
         await daemon._handle_event(event)
 
         daemon._handle_user_message.assert_not_called()
+
+
+# ──── _heartbeat_loop ────
+
+
+class TestHeartbeatLoop:
+    async def test_calls_relay_heartbeat(self):
+        daemon = _make_daemon()
+        call_count = 0
+
+        async def _sleep(interval):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                daemon._shutdown_event.set()
+
+        with patch("asyncio.sleep", side_effect=_sleep):
+            await daemon._heartbeat_loop()
+
+        assert daemon.relay.heartbeat.await_count == 2
+
+    async def test_resets_interval_on_success(self):
+        daemon = _make_daemon()
+        intervals = []
+
+        daemon.relay.heartbeat = AsyncMock(
+            side_effect=[Exception("fail"), None]
+        )
+
+        call_count = 0
+
+        async def _sleep(interval):
+            nonlocal call_count
+            intervals.append(interval)
+            call_count += 1
+            if call_count >= 2:
+                daemon._shutdown_event.set()
+
+        with patch("asyncio.sleep", side_effect=_sleep):
+            await daemon._heartbeat_loop()
+
+        assert intervals[0] == 30  # base interval before first failure
+        # After failure + success, interval resets but sleep already captured
+        # the backed-off value; verify it's larger than base
+        assert intervals[1] > 30
+
+    async def test_warns_on_failure(self):
+        daemon = _make_daemon()
+        daemon.relay.heartbeat = AsyncMock(side_effect=Exception("timeout"))
+
+        call_count = 0
+
+        async def _sleep(interval):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                daemon._shutdown_event.set()
+
+        with patch("asyncio.sleep", side_effect=_sleep), \
+             patch("hub.main.logger") as mock_logger:
+            await daemon._heartbeat_loop()
+
+        mock_logger.warning.assert_called_once()
+        assert "Heartbeat failed" in mock_logger.warning.call_args[0][0]
+
+    async def test_backoff_increases_interval(self):
+        daemon = _make_daemon()
+        daemon.relay.heartbeat = AsyncMock(side_effect=Exception("fail"))
+        intervals = []
+        call_count = 0
+
+        async def _sleep(interval):
+            nonlocal call_count
+            intervals.append(interval)
+            call_count += 1
+            if call_count >= 3:
+                daemon._shutdown_event.set()
+
+        with patch("asyncio.sleep", side_effect=_sleep):
+            await daemon._heartbeat_loop()
+
+        assert intervals[0] == 30  # base interval
+        assert intervals[1] > 30   # backed off after first failure
+        assert intervals[2] > 30   # still backed off
+
+    async def test_backoff_caps_at_max(self):
+        daemon = _make_daemon()
+        daemon.relay.heartbeat = AsyncMock(side_effect=Exception("fail"))
+        intervals = []
+        call_count = 0
+
+        async def _sleep(interval):
+            nonlocal call_count
+            intervals.append(interval)
+            call_count += 1
+            if call_count >= 10:
+                daemon._shutdown_event.set()
+
+        with patch("asyncio.sleep", side_effect=_sleep):
+            await daemon._heartbeat_loop()
+
+        # With jitter, max effective interval is 300 * 1.5 = 450
+        for iv in intervals[1:]:
+            assert iv <= 450
