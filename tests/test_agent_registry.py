@@ -47,7 +47,9 @@ SAMPLE_CARD = {
     "url": "http://localhost:9001/",
     "version": "1.0.0",
     "capabilities": {"streaming": True},
-    "skills": [{"id": "s1", "name": "Skill", "tags": ["chat"]}],
+    "skills": [{"id": "s1", "name": "Skill", "description": "A skill", "tags": ["chat"]}],
+    "defaultInputModes": ["text"],
+    "defaultOutputModes": ["text"],
 }
 
 
@@ -145,6 +147,29 @@ class TestDiscovery:
         agents = await registry.discover()
         assert len(agents) == 1
         assert agents[0].agent_card == SAMPLE_CARD
+        await registry.close()
+
+
+    @pytest.mark.asyncio
+    async def test_discover_rejects_non_agent_card_200(self, config):
+        """A 200 response with an error body should not register an agent."""
+        registry = AgentRegistry(config)
+
+        async def mock_get(url, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {
+                "error": "Unexpected endpoint or method. (GET /.well-known/agent-card.json)"
+            }
+            return resp
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = mock_get
+        registry._client = mock_client
+
+        agents = await registry.discover()
+        assert len(agents) == 0
         await registry.close()
 
 
