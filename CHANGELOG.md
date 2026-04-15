@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.17] - 2026-04-15
+
+### Added
+
+- `hybro-hub update` command: checks PyPI for newer versions of `hybro-hub`, `a2a-adapter`, and `a2a-sdk`, then upgrades in-place; auto-detects the install method (pipx, uv tool, pip, uv pip) and runs the matching upgrade command; `--dry-run` shows available upgrades without installing; `--restart` stops and restarts the daemon after a successful upgrade
+- `hybro-hub restart` command: gracefully stops the running daemon and spawns a new one; supports `--foreground` / `-f` to keep the restarted process in the terminal
+- Installer detection for editable/dev installs, conda environments, and missing package managers with clear guidance messages
+
 ## [0.1.16] - 2026-04-08
 
 ### Fixed
