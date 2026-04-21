@@ -25,10 +25,12 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse, urlunparse
 
 import httpx
-from a2a.utils.constants import (
-    AGENT_CARD_WELL_KNOWN_PATH,
-    PREV_AGENT_CARD_WELL_KNOWN_PATH,
-)
+from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
+
+try:
+    from a2a.utils.constants import PREV_AGENT_CARD_WELL_KNOWN_PATH
+except ImportError:
+    PREV_AGENT_CARD_WELL_KNOWN_PATH = "/.well-known/agent.json"
 
 from .config import HubConfig
 
