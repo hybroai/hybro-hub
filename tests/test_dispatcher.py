@@ -44,6 +44,7 @@ class TestDispatchSync:
         dispatcher = Dispatcher()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
+        mock_resp.is_success = True
         mock_resp.raise_for_status = MagicMock()
         mock_resp.json.return_value = {
             "jsonrpc": "2.0",
@@ -133,6 +134,7 @@ class TestDispatchSync:
 
         sync_resp = MagicMock()
         sync_resp.status_code = 200
+        sync_resp.is_success = True
         sync_resp.raise_for_status = MagicMock()
         sync_resp.json.return_value = {
             "jsonrpc": "2.0",
@@ -146,6 +148,7 @@ class TestDispatchSync:
 
         poll_resp = MagicMock()
         poll_resp.status_code = 200
+        poll_resp.is_success = True
         poll_resp.raise_for_status = MagicMock()
         poll_resp.json.return_value = {
             "jsonrpc": "2.0",
@@ -170,8 +173,8 @@ class TestDispatchSync:
 
         original_poll = dispatcher_mod.Dispatcher._poll_until_terminal
 
-        async def fast_poll(self, agent, result, **kwargs):
-            return await original_poll(self, agent, result, poll_interval=0, max_attempts=3)
+        async def fast_poll(self, agent, result, poll_interval=2.0, max_attempts=30, interface=None):
+            return await original_poll(self, agent, result, poll_interval=0, max_attempts=3, interface=interface)
 
         monkeypatch.setattr(dispatcher_mod.Dispatcher, "_poll_until_terminal", fast_poll)
 
@@ -198,6 +201,7 @@ class TestDispatchSync:
 
         sync_resp = MagicMock()
         sync_resp.status_code = 200
+        sync_resp.is_success = True
         sync_resp.raise_for_status = MagicMock()
         sync_resp.json.return_value = {
             "jsonrpc": "2.0",
@@ -211,6 +215,7 @@ class TestDispatchSync:
 
         still_working_resp = MagicMock()
         still_working_resp.status_code = 200
+        still_working_resp.is_success = True
         still_working_resp.raise_for_status = MagicMock()
         still_working_resp.json.return_value = {
             "jsonrpc": "2.0",
@@ -231,8 +236,8 @@ class TestDispatchSync:
 
         original_poll = dispatcher_mod.Dispatcher._poll_until_terminal
 
-        async def fast_poll(self, agent, result, **kwargs):
-            return await original_poll(self, agent, result, poll_interval=0, max_attempts=3)
+        async def fast_poll(self, agent, result, poll_interval=2.0, max_attempts=30, interface=None):
+            return await original_poll(self, agent, result, poll_interval=0, max_attempts=3, interface=interface)
 
         monkeypatch.setattr(dispatcher_mod.Dispatcher, "_poll_until_terminal", fast_poll)
 
@@ -254,11 +259,16 @@ class TestDispatchSync:
 
 class TestJsonRpcBuild:
     def test_build_jsonrpc(self):
-        body = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "message/send")
+        body = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "send", "0.3")
         assert body["jsonrpc"] == "2.0"
         assert body["method"] == "message/send"
-        assert body["params"]["message"] == SAMPLE_MESSAGE
+        assert body["params"]["message"]["parts"] == [{"kind": "text", "text": "Hello agent"}]
         assert "id" in body
+
+    def test_build_jsonrpc_v10(self):
+        body = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "send", "1.0")
+        assert body["method"] == "SendMessage"
+        assert body["params"]["message"]["parts"] == [{"text": "Hello agent"}]
 
 
 class TestExtractResponseContent:
@@ -685,40 +695,27 @@ class TestDispatchStreaming:
 
 class TestBuildJsonRpc:
     def test_no_configuration_omits_params_key(self):
-        """Without configuration, params only contains 'message'."""
-        from hub.dispatcher import Dispatcher
-
-        result = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "message/send")
+        result = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "send", "0.3")
         assert "configuration" not in result["params"]
-        assert result["params"]["message"] is SAMPLE_MESSAGE
         assert result["method"] == "message/send"
 
     def test_with_configuration_included_in_params(self):
-        """With configuration dict, params['configuration'] is present."""
-        from hub.dispatcher import Dispatcher
-
         cfg = {"blocking": True}
-        result = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "message/send", configuration=cfg)
+        result = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "send", "0.3", configuration=cfg)
         assert result["params"]["configuration"] == {"blocking": True}
-        assert result["params"]["message"] is SAMPLE_MESSAGE
 
     def test_streaming_call_omits_configuration(self):
-        """_dispatch_streaming calls _build_jsonrpc without configuration."""
-        from hub.dispatcher import Dispatcher
-
-        result = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "message/stream")
+        result = Dispatcher._build_jsonrpc(SAMPLE_MESSAGE, "stream", "0.3")
         assert "configuration" not in result["params"]
         assert result["method"] == "message/stream"
 
     @pytest.mark.asyncio
     async def test_dispatch_sync_sends_blocking_true(self, agent):
-        """Non-streaming dispatch must include blocking=True in the JSON-RPC params."""
-        from hub.dispatcher import Dispatcher
-
         sent_body = {}
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
+        mock_resp.is_success = True
         mock_resp.raise_for_status = MagicMock()
         mock_resp.json.return_value = {
             "jsonrpc": "2.0",
@@ -729,7 +726,7 @@ class TestBuildJsonRpc:
             },
         }
 
-        async def fake_post(url, *, json, headers):
+        async def fake_post(url, *, json, headers, **kwargs):
             sent_body.update(json)
             return mock_resp
 
@@ -753,9 +750,7 @@ class TestBuildJsonRpc:
 
     @pytest.mark.asyncio
     async def test_dispatch_streaming_does_not_send_blocking(self, streaming_agent):
-        """Streaming dispatch must NOT include blocking in the JSON-RPC params."""
         import hub.dispatcher as dispatcher_mod
-        from hub.dispatcher import Dispatcher
 
         sent_body = {}
 
@@ -791,3 +786,471 @@ class TestBuildJsonRpc:
             dispatcher_mod.aconnect_sse = original
 
         assert "configuration" not in sent_body.get("params", {})
+
+
+# ---------------------------------------------------------------------------
+# V1.0 dual-protocol tests
+# ---------------------------------------------------------------------------
+
+import httpx
+from hub.a2a_compat import ResolvedInterface, A2AVersionFallbackError
+
+
+V10_INTERFACE = ResolvedInterface(binding="JSONRPC", protocol_version="1.0", url="http://localhost:9001/a2a")
+V03_INTERFACE = ResolvedInterface(binding="JSONRPC", protocol_version="0.3", url="http://localhost:9001")
+
+
+@pytest.fixture
+def v10_agent():
+    return LocalAgent(
+        local_agent_id="test_v10",
+        name="V1.0 Agent",
+        url="http://localhost:9001",
+        agent_card={"capabilities": {"streaming": False}},
+        interface=V10_INTERFACE,
+    )
+
+
+class TestV10MethodRouting:
+    @pytest.mark.asyncio
+    async def test_v10_sync_uses_sendmessage(self, v10_agent):
+        sent_body = {}
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": {
+                "task": {
+                    "id": "t-1",
+                    "status": {
+                        "state": "TASK_STATE_COMPLETED",
+                        "message": {"role": "ROLE_AGENT", "parts": [{"text": "done"}]},
+                    },
+                },
+            },
+        }
+
+        async def fake_post(url, *, json, headers, **kwargs):
+            sent_body.update(json)
+            sent_body["_url"] = url
+            sent_body["_headers"] = headers
+            return mock_resp
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = fake_post
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        events = []
+        async for batch in dispatcher.dispatch(
+            agent=v10_agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-v10-001",
+            user_message_id="um-001",
+        ):
+            events.extend(batch)
+
+        assert sent_body["method"] == "SendMessage"
+        assert sent_body["_url"] == "http://localhost:9001/a2a"
+        assert sent_body["_headers"]["A2A-Version"] == "1.0"
+        assert events[0]["type"] == "agent_response"
+        assert events[0]["data"]["content"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_v10_cancel_uses_canceltask(self, v10_agent):
+        dispatcher = Dispatcher()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        dispatcher._client = mock_client
+
+        await dispatcher.cancel_task(v10_agent, "task-xyz")
+
+        call_kwargs = mock_client.post.call_args
+        body = call_kwargs[1]["json"] if "json" in call_kwargs[1] else call_kwargs[0][1]
+        assert body["method"] == "CancelTask"
+
+
+class TestFetchTaskErrorHandling:
+    @pytest.mark.asyncio
+    async def test_fetch_task_raises_on_jsonrpc_error(self, v10_agent):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "error": {"code": -32600, "message": "Invalid params"},
+        }
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        with pytest.raises(RuntimeError, match="JSON-RPC error -32600"):
+            await dispatcher._fetch_task(v10_agent, "task-xyz")
+
+    @pytest.mark.asyncio
+    async def test_fetch_task_raises_fallback_on_method_not_found(self, v10_agent):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.is_success = True
+        mock_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "error": {"code": -32601, "message": "Method not found"},
+        }
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        with pytest.raises(A2AVersionFallbackError):
+            await dispatcher._fetch_task(v10_agent, "task-xyz")
+
+
+class TestCheckResponse:
+    def test_unparseable_2xx_raises(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.is_success = True
+        resp.json.side_effect = ValueError("No JSON")
+        with pytest.raises(RuntimeError, match="unparseable body"):
+            Dispatcher._check_response(resp)
+
+    def test_unparseable_4xx_raises_for_status(self):
+        resp = MagicMock()
+        resp.status_code = 502
+        resp.is_success = False
+        resp.json.side_effect = ValueError("No JSON")
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "Bad Gateway", request=MagicMock(), response=resp,
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            Dispatcher._check_response(resp)
+
+    def test_valid_json_rpc_success(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.is_success = True
+        resp.json.return_value = {"jsonrpc": "2.0", "id": "1", "result": {"id": "t1"}}
+        raw = Dispatcher._check_response(resp)
+        assert raw["result"]["id"] == "t1"
+
+
+@pytest.fixture
+def v10_agent_with_fallback():
+    return LocalAgent(
+        local_agent_id="test_v10_fb",
+        name="V1.0 Agent (fallback)",
+        url="http://localhost:9001",
+        agent_card={"capabilities": {"streaming": False}},
+        interface=ResolvedInterface(binding="JSONRPC", protocol_version="1.0", url="http://localhost:9001/v1"),
+        fallback_interface=ResolvedInterface(binding="JSONRPC", protocol_version="0.3", url="http://localhost:9001/v03"),
+    )
+
+
+class TestFallbackRetry:
+    @pytest.mark.asyncio
+    async def test_sync_fallback_on_method_not_found(self, v10_agent_with_fallback):
+        agent = v10_agent_with_fallback
+        call_count = 0
+
+        v10_error_resp = MagicMock()
+        v10_error_resp.status_code = 200
+        v10_error_resp.is_success = True
+        v10_error_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "error": {"code": -32601, "message": "Method not found"},
+        }
+
+        v03_success_resp = MagicMock()
+        v03_success_resp.status_code = 200
+        v03_success_resp.is_success = True
+        v03_success_resp.raise_for_status = MagicMock()
+        v03_success_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "2",
+            "result": {
+                "kind": "task",
+                "id": "t-1",
+                "status": {
+                    "state": "completed",
+                    "message": {"role": "agent", "parts": [{"text": "fallback ok"}]},
+                },
+            },
+        }
+
+        urls_called = []
+
+        async def fake_post(url, *, json, headers, **kwargs):
+            urls_called.append(url)
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return v10_error_resp
+            return v03_success_resp
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = fake_post
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        events = []
+        async for batch in dispatcher.dispatch(
+            agent=agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-fb-001",
+            user_message_id="um-001",
+        ):
+            events.extend(batch)
+
+        assert urls_called[0] == "http://localhost:9001/v1"
+        assert urls_called[1] == "http://localhost:9001/v03"
+        assert events[0]["type"] == "agent_response"
+        assert events[0]["data"]["content"] == "fallback ok"
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_without_fallback_interface(self):
+        agent = LocalAgent(
+            local_agent_id="test_nofb",
+            name="No Fallback Agent",
+            url="http://localhost:9001",
+            agent_card={"capabilities": {"streaming": False}},
+            interface=ResolvedInterface(binding="JSONRPC", protocol_version="1.0", url="http://localhost:9001/v1"),
+            fallback_interface=None,
+        )
+
+        error_resp = MagicMock()
+        error_resp.status_code = 200
+        error_resp.is_success = True
+        error_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "error": {"code": -32601, "message": "Method not found"},
+        }
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = AsyncMock(return_value=error_resp)
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        events = []
+        async for batch in dispatcher.dispatch(
+            agent=agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-nofb",
+            user_message_id="um-nofb",
+        ):
+            events.extend(batch)
+
+        assert events[0]["type"] == "agent_error"
+        assert events[1]["data"]["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_non_fallback_jsonrpc_error_propagates(self):
+        agent = LocalAgent(
+            local_agent_id="test_other_err",
+            name="Other Error Agent",
+            url="http://localhost:9001",
+            agent_card={"capabilities": {"streaming": False}},
+            interface=V10_INTERFACE,
+            fallback_interface=V03_INTERFACE,
+        )
+
+        error_resp = MagicMock()
+        error_resp.status_code = 200
+        error_resp.is_success = True
+        error_resp.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "error": {"code": -32600, "message": "Invalid Request"},
+        }
+
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.post = AsyncMock(return_value=error_resp)
+        dispatcher = Dispatcher()
+        dispatcher._client = mock_client
+
+        events = []
+        async for batch in dispatcher.dispatch(
+            agent=agent,
+            message_dict=SAMPLE_MESSAGE,
+            agent_message_id="am-other",
+            user_message_id="um-other",
+        ):
+            events.extend(batch)
+
+        assert mock_client.post.call_count == 1
+        assert events[0]["type"] == "agent_error"
+
+
+# ---------------------------------------------------------------------------
+# V1.0 Streaming tests (Task 13)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def v10_streaming_agent():
+    return LocalAgent(
+        local_agent_id="test_v10_stream",
+        name="V1.0 Streaming Agent",
+        url="http://localhost:9002",
+        agent_card={"capabilities": {"streaming": True}},
+        interface=ResolvedInterface(binding="JSONRPC", protocol_version="1.0", url="http://localhost:9002/a2a"),
+    )
+
+
+class TestV10Streaming:
+    @pytest.mark.asyncio
+    async def test_v10_stream_status_and_artifact(self, v10_streaming_agent):
+        canned = [
+            {"result": {"task": {"id": "t-1", "status": {"state": "TASK_STATE_SUBMITTED"}}}},
+            {"result": {"artifactUpdate": {
+                "artifact": {"artifactId": "art-1", "parts": [{"text": "v1 chunk"}]},
+                "append": True,
+                "lastChunk": False,
+            }}},
+            {"result": {"statusUpdate": {
+                "status": {"state": "TASK_STATE_COMPLETED"},
+            }}},
+        ]
+
+        dispatcher = Dispatcher()
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client._canned_events = canned
+        dispatcher._client = mock_client
+
+        import hub.dispatcher as dispatcher_mod
+        original = dispatcher_mod.aconnect_sse
+        dispatcher_mod.aconnect_sse = _fake_aconnect_sse
+        try:
+            batches = []
+            async for batch in dispatcher.dispatch(
+                agent=v10_streaming_agent,
+                message_dict=SAMPLE_MESSAGE,
+                agent_message_id="am-v10-stream",
+                user_message_id="um-v10-stream",
+            ):
+                batches.append(batch)
+        finally:
+            dispatcher_mod.aconnect_sse = original
+
+        streaming_events = [ev for b in batches[:-1] for ev in b]
+        terminal = batches[-1]
+
+        artifact_updates = [e for e in streaming_events if e["type"] == "artifact_update"]
+        assert len(artifact_updates) == 1
+        assert artifact_updates[0]["data"]["text"] == "v1 chunk"
+
+        status_events = [e for e in streaming_events if e["type"] == "task_status"]
+        assert len(status_events) == 1
+        assert status_events[0]["data"]["state"] == "completed"
+        assert status_events[0]["data"]["final"] is True
+
+        response = next(e for e in terminal if e["type"] == "agent_response")
+        assert response["data"]["content"] == "v1 chunk"
+
+    @pytest.mark.asyncio
+    async def test_v10_stream_message_kind(self, v10_streaming_agent):
+        canned = [
+            {"result": {"task": {"id": "t-2", "status": {"state": "TASK_STATE_SUBMITTED"}}}},
+            {"result": {"message": {"role": "ROLE_AGENT", "parts": [{"text": "hello from v1"}]}}},
+            {"result": {"statusUpdate": {"status": {"state": "TASK_STATE_COMPLETED"}}}},
+        ]
+
+        dispatcher = Dispatcher()
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client._canned_events = canned
+        dispatcher._client = mock_client
+
+        import hub.dispatcher as dispatcher_mod
+        original = dispatcher_mod.aconnect_sse
+        dispatcher_mod.aconnect_sse = _fake_aconnect_sse
+        try:
+            batches = []
+            async for batch in dispatcher.dispatch(
+                agent=v10_streaming_agent,
+                message_dict=SAMPLE_MESSAGE,
+                agent_message_id="am-v10-msg",
+                user_message_id="um-v10-msg",
+            ):
+                batches.append(batch)
+        finally:
+            dispatcher_mod.aconnect_sse = original
+
+        streaming_events = [ev for b in batches[:-1] for ev in b]
+        artifact_updates = [e for e in streaming_events if e["type"] == "artifact_update"]
+        assert len(artifact_updates) == 1
+        assert artifact_updates[0]["data"]["text"] == "hello from v1"
+
+    @pytest.mark.asyncio
+    async def test_v10_stream_fallback_on_first_event_error(self):
+        agent = LocalAgent(
+            local_agent_id="test_stream_fb",
+            name="Stream Fallback Agent",
+            url="http://localhost:9002",
+            agent_card={"capabilities": {"streaming": True}},
+            interface=ResolvedInterface(binding="JSONRPC", protocol_version="1.0", url="http://localhost:9002/v1"),
+            fallback_interface=ResolvedInterface(binding="JSONRPC", protocol_version="0.3", url="http://localhost:9002/v03"),
+        )
+
+        v10_error_events = [
+            {"jsonrpc": "2.0", "id": "1", "error": {"code": -32601, "message": "Method not found"}},
+        ]
+        v03_success_events = [
+            {"result": {"kind": "task", "id": "t-fb", "contextId": "ctx-fb"}},
+            {"result": {"kind": "status-update", "status": {"state": "completed"}, "final": True}},
+        ]
+
+        import hub.dispatcher as dispatcher_mod
+
+        call_count = 0
+
+        @asynccontextmanager
+        async def switching_sse(client, method, url, *, json, headers):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield FakeEventSource(v10_error_events)
+            else:
+                yield FakeEventSource(v03_success_events)
+
+        original = dispatcher_mod.aconnect_sse
+        dispatcher_mod.aconnect_sse = switching_sse
+        try:
+            dispatcher = Dispatcher()
+            mock_client = AsyncMock()
+            mock_client.is_closed = False
+            dispatcher._client = mock_client
+
+            batches = []
+            async for batch in dispatcher.dispatch(
+                agent=agent,
+                message_dict=SAMPLE_MESSAGE,
+                agent_message_id="am-stream-fb",
+                user_message_id="um-stream-fb",
+            ):
+                batches.append(batch)
+        finally:
+            dispatcher_mod.aconnect_sse = original
+
+        assert call_count == 2
+        terminal = batches[-1]
+        status = next(e for e in terminal if e["type"] == "processing_status")
+        assert status["data"]["status"] != "failed"

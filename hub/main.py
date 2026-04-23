@@ -318,7 +318,7 @@ class HubDaemon:
 
         reply_message: dict[str, Any] = {
             "role": "user",
-            "parts": [{"kind": "text", "text": reply_text}],
+            "parts": [{"text": reply_text}],
             "messageId": uuid4().hex,
         }
         if task_id:
