@@ -420,7 +420,9 @@ class HubDaemon:
             await asyncio.sleep(RESYNC_INTERVAL)
             try:
                 await self.registry.discover()
-                await self._sync_agents()
+                # Force POST even when the roster is unchanged so the cloud can
+                # refresh Redis TTL + agent_status after relay blips.
+                await self._sync_agents(force=True)
             except Exception:
                 logger.exception("Agent re-sync failed")
 
@@ -437,9 +439,9 @@ class HubDaemon:
                 interval = min(interval * 2, max_interval)
                 interval *= 0.5 + random.random()
 
-    async def _sync_agents(self) -> None:
+    async def _sync_agents(self, *, force: bool = False) -> None:
         payload = self.registry.to_sync_payload()
-        if payload == self._last_sync_payload:
+        if not force and payload == self._last_sync_payload:
             return
         synced = await self.relay.sync_agents(payload)
         self._last_sync_payload = payload

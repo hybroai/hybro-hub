@@ -416,10 +416,14 @@ def _ports_macos() -> set[int] | None:
     Only ports whose host is a wildcard or a loopback address are returned.
     """
     try:
+        # lsof COMMAND/NAME can contain non-UTF-8 bytes (paths, legacy encodings).
+        # Strict decoding would raise UnicodeDecodeError and break auto-discover.
         result = subprocess.run(
             [_LSOF_BIN, "-iTCP", "-sTCP:LISTEN", "-n", "-P"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:

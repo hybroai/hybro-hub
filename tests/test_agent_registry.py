@@ -370,6 +370,17 @@ class TestPortsMacos:
         with patch("subprocess.run", return_value=mock_result):
             assert _ports_macos() == set()
 
+    def test_subprocess_decodes_with_replace_errors(self):
+        """Non-UTF-8 in lsof output must not crash discovery (PEP 597 / locale defaults are strict)."""
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            _ports_macos()
+        mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs.get("encoding") == "utf-8"
+        assert kwargs.get("errors") == "replace"
+
 
 class TestPortsLinux:
     """Unit tests for _ports_linux() and _decode_proc_ip()."""
