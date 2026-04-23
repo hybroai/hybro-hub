@@ -26,18 +26,19 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 from a2a.types import AgentCard
-from a2a.utils.constants import (
-    AGENT_CARD_WELL_KNOWN_PATH,
-    PREV_AGENT_CARD_WELL_KNOWN_PATH,
-)
+from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
+from google.protobuf.json_format import ParseDict
 
 from .config import HubConfig
 
 logger = logging.getLogger(__name__)
 
+# Legacy path used by older A2A deployments (removed from a2a-sdk re-exports).
+_LEGACY_AGENT_CARD_WELL_KNOWN_PATH = "/.well-known/agent.json"
+
 AGENT_CARD_PATHS = [
-    AGENT_CARD_WELL_KNOWN_PATH,       # /.well-known/agent-card.json
-    PREV_AGENT_CARD_WELL_KNOWN_PATH,  # /.well-known/agent.json
+    AGENT_CARD_WELL_KNOWN_PATH,  # /.well-known/agent-card.json
+    _LEGACY_AGENT_CARD_WELL_KNOWN_PATH,
 ]
 DISCOVERY_TIMEOUT = 3
 
@@ -206,8 +207,9 @@ class AgentRegistry:
     async def _fetch_agent_card(self, url: str, source: str = "config") -> dict | None:
         """Try each well-known agent card path and return the first valid card.
 
-        Validates the response with AgentCard.model_validate() to reject
-        non-agent HTTP 200 responses (e.g. error JSON from unrelated servers).
+        Validates the response by parsing into the SDK ``AgentCard`` protobuf
+        to reject non-agent HTTP 200 responses (e.g. error JSON from unrelated
+        servers).
         """
         client = await self._get_client()
         for path in AGENT_CARD_PATHS:
@@ -215,7 +217,14 @@ class AgentRegistry:
                 resp = await client.get(f"{url}{path}")
                 if resp.status_code == 200:
                     card_data = resp.json()
-                    AgentCard.model_validate(card_data)
+                    proto = AgentCard()
+                    ParseDict(
+                        card_data,
+                        proto,
+                        ignore_unknown_fields=True,
+                    )
+                    if not proto.name.strip():
+                        continue
                     return card_data
             except Exception:
                 continue

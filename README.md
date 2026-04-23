@@ -94,7 +94,7 @@ Add it to a room, send a message. The response streams back with a **🏠 Local*
 │  Your Machine                                   │
 │                                                 │
 │   Hybro Hub (background daemon)                 │
-│   ├── Your local agents (Ollama, custom, etc.)  │
+│   ├── Your local agents (Ollama, Hermes, etc.)  │
 │   ├── Privacy router                            │
 │   └── Relay client ──outbound HTTPS only──┐     │
 │                                           │     │
@@ -247,7 +247,7 @@ hybro-hub agents
 
 ### `hybro-hub agent start`
 
-Launch a local A2A agent from a bundled adapter. Supported adapters: **ollama**, **openclaw**, **n8n**.
+Launch a local A2A agent from a bundled adapter. Supported adapters: **ollama**, **openclaw**, **n8n**, **hermes** ([Hermes Agent](https://github.com/NousResearch/hermes-agent) via [a2a-adapter](https://pypi.org/project/a2a-adapter/) `HermesAdapter`).
 
 **Ollama** — local LLM (requires [Ollama](https://ollama.com)):
 
@@ -269,6 +269,16 @@ hybro-hub agent start openclaw --thinking medium --agent-id main
 hybro-hub agent start n8n --webhook-url http://localhost:5678/webhook/my-agent
 ```
 
+**Hermes** — multi-purpose assistant with tool use and persistent memory (requires a local [Hermes Agent](https://github.com/NousResearch/hermes-agent) checkout on `PYTHONPATH`, plus `hermes setup` for `~/.hermes/config.yaml`):
+
+```bash
+export PYTHONPATH=/path/to/hermes-agent:$PYTHONPATH
+hybro-hub agent start hermes
+hybro-hub agent start hermes --model anthropic/claude-sonnet-4 --enabled-toolsets hermes-cli
+```
+
+For more options (`provider`, extra toolsets, custom card text), use `--config` with a YAML file whose top-level `adapter:` is `hermes` (see [a2a-adapter examples](https://github.com/hybroai/a2a-adapter/blob/main/examples/hermes_agent.py)).
+
 **Common options:**
 
 | Option      | Default | Description                   |
@@ -281,14 +291,16 @@ hybro-hub agent start n8n --webhook-url http://localhost:5678/webhook/my-agent
 
 | Option            | Adapter  | Description                                       |
 | ----------------- | -------- | ------------------------------------------------- |
-| `--model`         | ollama   | Ollama model (default: `llama3.2`)             |
+| `--model`         | ollama, hermes | Ollama: model name (default `llama3.2`). Hermes: optional model override |
 | `--system-prompt` | ollama   | Custom system prompt                              |
 | `--thinking`      | openclaw | Thinking level: off/minimal/low/medium/high/xhigh |
 | `--agent-id`      | openclaw | OpenClaw agent ID                                 |
 | `--openclaw-path` | openclaw | Path to the openclaw binary                       |
 | `--webhook-url`   | n8n      | Webhook URL (required)                            |
+| `--provider`      | hermes   | Provider override (optional)                      |
+| `--enabled-toolsets` | hermes | Comma-separated toolsets (default: `hermes-cli`) |
 
-> Requires the `a2a-adapter` package: `pip install a2a-adapter`
+`hybro-hub` depends on **a2a-adapter**; `pip install hybro-hub` installs it. To upgrade adapters and the SDK alongside the hub, run `hybro-hub update`.
 
 ---
 
@@ -456,6 +468,7 @@ except RateLimitError as e:
 
 - Python 3.11+
 - [Ollama](https://ollama.com) (optional, for the built-in Ollama adapter)
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) on `PYTHONPATH` (optional, for the Hermes adapter)
 - A [hybro.ai](https://hybro.ai) account with an API key
 
 ## Development

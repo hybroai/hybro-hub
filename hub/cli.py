@@ -895,6 +895,10 @@ _CLI_ADAPTERS = {
         "description": "n8n workflow via webhook",
         "install_hint": "pip install a2a-adapter",
     },
+    "hermes": {
+        "description": "Hermes Agent (tools, memory) via gateway pattern",
+        "install_hint": "pip install a2a-adapter",
+    },
 }
 
 
@@ -957,6 +961,13 @@ def _validate_ollama_model(model: str, base_url: str = "http://localhost:11434")
 @click.option("--agent-id", default=None, help="[openclaw] OpenClaw agent ID.")
 @click.option("--openclaw-path", default=None, help="[openclaw] Path to openclaw binary.")
 @click.option("--webhook-url", default=None, help="[n8n] Webhook URL (required for n8n).")
+@click.option("--provider", default=None, help="[hermes] LLM provider override (optional).")
+@click.option(
+    "--enabled-toolsets",
+    "enabled_toolsets",
+    default=None,
+    help="[hermes] Comma-separated toolsets (default: hermes-cli).",
+)
 @click.option("--timeout", default=None, type=int, help="Request timeout in seconds.")
 @click.pass_context
 def agent_start(
@@ -971,11 +982,13 @@ def agent_start(
     agent_id: str | None,
     openclaw_path: str | None,
     webhook_url: str | None,
+    provider: str | None,
+    enabled_toolsets: str | None,
     timeout: int | None,
 ) -> None:
     """Start a local A2A agent adapter.
 
-    Supported adapters: ollama, openclaw, n8n.
+    Supported adapters: ollama, openclaw, n8n, hermes.
 
     \b
     CLI flags are a convenience shortcut for common parameters.
@@ -988,6 +1001,8 @@ def agent_start(
       hybro-hub agent start ollama --model mistral:7b --port 10020
       hybro-hub agent start openclaw --thinking medium
       hybro-hub agent start n8n --webhook-url http://localhost:5678/webhook/agent
+      hybro-hub agent start hermes
+      hybro-hub agent start hermes --model anthropic/claude-sonnet-4
       hybro-hub agent start --config hybro-agent.yaml
     """
     # Mutual-exclusion guard and auto-discovery
@@ -1066,6 +1081,23 @@ def agent_start(
             if timeout:
                 config["timeout"] = timeout
 
+        elif adapter_type == "hermes":
+            config["name"] = agent_name or "Hermes Agent"
+            config["description"] = (
+                "Hermes AI agent — tool use, persistent memory, streaming"
+            )
+            if model:
+                config["model"] = model
+            if provider:
+                config["provider"] = provider
+            if enabled_toolsets:
+                ts = [s.strip() for s in enabled_toolsets.split(",") if s.strip()]
+                config["enabled_toolsets"] = ts if ts else ["hermes-cli"]
+            else:
+                config["enabled_toolsets"] = ["hermes-cli"]
+            if timeout:
+                config["timeout"] = timeout
+
     try:
         from a2a_adapter import serve_agent
         from a2a_adapter.loader import load_adapter
@@ -1098,6 +1130,13 @@ def agent_start(
     elif adapter_type_display == "n8n":
         wh = config.get("webhook_url") or webhook_url
         click.echo(f"  Webhook: {wh}")
+    elif adapter_type_display == "hermes":
+        m = config.get("model")
+        click.echo(f"  Model:    {m if m else '(from Hermes ~/.hermes/config.yaml)'}")
+        ts = config.get("enabled_toolsets") or ["hermes-cli"]
+        click.echo(f"  Toolsets: {', '.join(ts)}")
+        if config.get("provider"):
+            click.echo(f"  Provider: {config['provider']}")
     if config_path:
         click.echo(f"  Config:  {config_path}")
     click.echo("")

@@ -52,6 +52,17 @@ agents:
   #   - name: "Remote Agent"
   #     url: "http://192.168.1.50:9002"
 
+  # Hermes (a2a-adapter HermesAdapter): start the server with
+  #   export PYTHONPATH=/path/to/hermes-agent:$PYTHONPATH
+  #   hybro-hub agent start --config hybro-agent.yaml
+  # Example hybro-agent.yaml:
+  #   adapter: hermes
+  #   port: 10010
+  #   name: "Hermes"
+  #   enabled_toolsets: ["hermes-cli"]
+  #   model: "anthropic/claude-sonnet-4"   # optional
+  #   provider: "openrouter"                        # optional
+
 
 # ── Privacy (sensitivity classification) ──────────────────────────────────────
 #

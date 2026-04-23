@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `hybro-hub agent start hermes` — [Hermes Agent](https://github.com/NousResearch/hermes-agent) via [a2a-adapter](https://pypi.org/project/a2a-adapter/) `HermesAdapter`, with `--model`, `--provider`, and `--enabled-toolsets` CLI shortcuts; documented in README and `config.yaml.example`
+
 ## [0.1.17] - 2026-04-15
 
 ### Added
