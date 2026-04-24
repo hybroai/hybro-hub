@@ -7,9 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-04-23
+
 ### Added
 
 - `hybro-hub agent start hermes` — [Hermes Agent](https://github.com/NousResearch/hermes-agent) via [a2a-adapter](https://pypi.org/project/a2a-adapter/) `HermesAdapter`, with `--model`, `--provider`, and `--enabled-toolsets` CLI shortcuts; documented in README and `config.yaml.example`
+
+### Fixed
+
+- A2A v1.0 dispatch now normalizes legacy relay user messages before sending them to v1 local agents: strips stale top-level/message-part `kind` fields, encodes v1 role enums, and translates sync `blocking` config to `returnImmediately`, fixing Codex adapter `-32602 Invalid params` failures
+
+### Removed
+
+- Internal dual-protocol design/implementation planning docs from `docs/superpowers/`
 
 ## [0.1.17] - 2026-04-15
 

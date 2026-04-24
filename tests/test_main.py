@@ -392,3 +392,32 @@ class TestHeartbeatLoop:
         # With jitter, max effective interval is 300 * 1.5 = 450
         for iv in intervals[1:]:
             assert iv <= 450
+
+
+class TestHandleUserReplyCanonicalParts:
+    async def test_hitl_reply_uses_flattened_parts(self):
+        """HITL reply must use canonical flattened parts (no 'kind')."""
+        daemon = _make_daemon()
+        daemon.registry.get_agent.return_value = AGENT
+
+        dispatched_message = {}
+
+        async def _capture_dispatch(**kwargs):
+            dispatched_message.update(kwargs.get("message_dict", {}))
+            yield [{"type": "agent_response", "agent_message_id": "amsg-12345678", "data": {"content": "ok"}}]
+
+        daemon.dispatcher.dispatch = _capture_dispatch
+
+        await daemon._handle_user_reply(_full_user_reply_event())
+
+        parts = dispatched_message.get("parts", [])
+        assert len(parts) == 1
+        assert "kind" not in parts[0]
+        assert parts[0]["text"] == "yes"
+
+
+class TestLocalAgentDefaultInterface:
+    def test_agent_has_default_interface(self):
+        assert AGENT.interface is not None
+        assert AGENT.interface.protocol_version == "0.3"
+        assert AGENT.interface.url == "http://localhost:9001"

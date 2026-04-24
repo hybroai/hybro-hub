@@ -17,6 +17,8 @@ from uuid import uuid4
 import httpx
 from httpx_sse import aconnect_sse
 
+from . import a2a_compat
+from .a2a_compat import A2AVersionFallbackError, ResolvedInterface
 from .agent_registry import LocalAgent
 
 logger = logging.getLogger(__name__)
@@ -107,43 +109,41 @@ class Dispatcher:
     ) -> AsyncIterator[list[dict]]:
         """Dispatch an A2A message to a local agent, yielding event batches.
 
-        The caller is responsible for publishing the initial ``task_submitted``
-        event before iterating so the cloud UI shows immediate feedback.
-
-        Streaming events (tokens, artifacts, status updates) are yielded
-        individually as they arrive from the agent.  Terminal events
-        (response/error + processing_status) are yielded as a final batch.
-
-        Yields:
-            Lists of HubPublishEvent dicts ready for relay.publish().
+        If v1.0 dispatch fails with a fallback-eligible JSON-RPC error,
+        retries once with v0.3 wire format using agent.fallback_interface.
         """
         result = DispatchResult()
+        interface = agent.interface
 
         try:
-            # TODO(long-running): Check agent_card for a longRunning capability
-            # and route to a non-blocking dispatch + polling strategy that skips
-            # blocking=True and uses exponential backoff with generous limits.
-            if agent.agent_card.get("capabilities", {}).get("streaming"):
-                async for event in self._dispatch_streaming(agent, message_dict, agent_message_id):
-                    ev_dict = event.to_publish_dict()
-                    if event.type in ("artifact_update", "task_status"):
-                        yield [ev_dict]
-                    if event.type == "artifact_update":
-                        result.artifact_text += event.data.get("text", "")
-                    elif event.type == "task_status":
-                        result.task_state = event.data.get("state")
-                        result.task_id = event.data.get("task_id") or result.task_id
-                        result.context_id = event.data.get("context_id") or result.context_id
-                    elif event.type == "task_submitted":
-                        result.task_id = event.data.get("task_id") or result.task_id
-                        result.context_id = event.data.get("context_id") or result.context_id
-
-                if not result.artifact_text and result.task_id:
-                    result = await self._refetch_final_task(agent, result)
+            async for batch in self._dispatch_with_interface(
+                agent, message_dict, agent_message_id, interface, result,
+            ):
+                yield batch
+        except A2AVersionFallbackError as fallback_exc:
+            if agent.fallback_interface:
+                logger.warning(
+                    "v1.0 dispatch to %s failed (%s) — retrying with v0.3",
+                    agent.name, fallback_exc,
+                )
+                result = DispatchResult()
+                try:
+                    async for batch in self._dispatch_with_interface(
+                        agent, message_dict, agent_message_id,
+                        agent.fallback_interface, result,
+                    ):
+                        yield batch
+                except Exception as exc:
+                    logger.error(
+                        "Fallback dispatch to %s also failed: %s",
+                        agent.name, exc, exc_info=True,
+                    )
+                    result = DispatchResult()
+                    result.error = str(fallback_exc) or repr(fallback_exc)
+                    result.error_type = "A2AVersionFallback"
             else:
-                result = await self._dispatch_sync(agent, message_dict)
-                if result.task_state in NON_TERMINAL_STATES and result.task_id:
-                    result = await self._poll_until_terminal(agent, result)
+                result.error = str(fallback_exc) or repr(fallback_exc)
+                result.error_type = "A2AVersionFallback"
         except Exception as exc:
             logger.error("Dispatch to %s failed: %s", agent.name, exc, exc_info=True)
             result.error = str(exc) or repr(exc) or "Unknown dispatch error"
@@ -152,6 +152,52 @@ class Dispatcher:
         terminal: list[dict] = []
         self._emit_terminal_events(terminal, result, agent_message_id, user_message_id, agent.local_agent_id)
         yield terminal
+
+    async def _dispatch_with_interface(
+        self,
+        agent: LocalAgent,
+        message_dict: dict,
+        agent_message_id: str,
+        interface: ResolvedInterface,
+        result: DispatchResult,
+    ) -> AsyncIterator[list[dict]]:
+        """Core dispatch logic using a specific interface. Populates result in-place."""
+        if agent.agent_card.get("capabilities", {}).get("streaming"):
+            async for event in self._dispatch_streaming(agent, message_dict, agent_message_id, interface):
+                ev_dict = event.to_publish_dict()
+                if event.type in ("artifact_update", "task_status"):
+                    yield [ev_dict]
+                if event.type == "artifact_update":
+                    result.artifact_text += event.data.get("text", "")
+                elif event.type == "task_status":
+                    result.task_state = event.data.get("state")
+                    result.task_id = event.data.get("task_id") or result.task_id
+                    result.context_id = event.data.get("context_id") or result.context_id
+                elif event.type == "task_submitted":
+                    result.task_id = event.data.get("task_id") or result.task_id
+                    result.context_id = event.data.get("context_id") or result.context_id
+
+            if not result.artifact_text and result.task_id:
+                result_copy = await self._refetch_final_task(agent, result, interface=interface)
+                result.artifact_text = result_copy.artifact_text
+                result.raw_parts = result_copy.raw_parts
+                result.task_state = result_copy.task_state or result.task_state
+        else:
+            sync_result = await self._dispatch_sync(agent, message_dict, interface)
+            result.text = sync_result.text
+            result.artifact_text = sync_result.artifact_text
+            result.raw_parts = sync_result.raw_parts
+            result.task_state = sync_result.task_state
+            result.task_id = sync_result.task_id
+            result.context_id = sync_result.context_id
+            if result.task_state in NON_TERMINAL_STATES and result.task_id:
+                polled = await self._poll_until_terminal(agent, result, interface=interface)
+                result.text = polled.text
+                result.artifact_text = polled.artifact_text
+                result.raw_parts = polled.raw_parts
+                result.task_state = polled.task_state
+                result.error = polled.error
+                result.error_type = polled.error_type
 
     def _emit_terminal_events(
         self,
@@ -237,20 +283,40 @@ class Dispatcher:
     async def cancel_task(self, agent: LocalAgent, task_id: str) -> None:
         """Best-effort cancellation of an in-flight task on a local agent.
 
-        Raises on network or HTTP errors — callers should catch and log.
+        Uses _check_response for JSON-RPC error handling and retries on
+        fallback interface if the primary returns a version-mismatch error.
         """
+        iface = agent.interface
+        try:
+            await self._do_cancel_task(agent, task_id, iface)
+        except A2AVersionFallbackError:
+            fb = agent.fallback_interface
+            if fb and fb != iface:
+                logger.info(
+                    "CancelTask on %s failed with version error — retrying on fallback %s",
+                    iface.url, fb.url,
+                )
+                await self._do_cancel_task(agent, task_id, fb)
+            else:
+                raise
+
+    async def _do_cancel_task(
+        self, agent: LocalAgent, task_id: str,
+        iface: ResolvedInterface,
+    ) -> None:
+        """Low-level cancel on a specific interface."""
+        version = iface.protocol_version
+        method = a2a_compat.get_method_name("cancel_task", version)
+        headers = {"Content-Type": "application/json", **a2a_compat.get_headers(version)}
         client = await self._get_client()
         body = {
             "jsonrpc": "2.0",
             "id": uuid4().hex,
-            "method": "tasks/cancel",
+            "method": method,
             "params": {"id": task_id},
         }
-        resp = await client.post(
-            agent.url,
-            json=body,
-            headers={"Content-Type": "application/json"},
-        )
+        resp = await client.post(iface.url, json=body, headers=headers)
+        self._check_response(resp)
         logger.info("Cancel response from %s: %d", agent.name, resp.status_code)
 
     # ──── Sync dispatch (message/send) ────
@@ -258,50 +324,65 @@ class Dispatcher:
     async def _fetch_task(
         self, agent: LocalAgent, task_id: str,
         timeout: float | None = None,
+        interface: ResolvedInterface | None = None,
     ) -> dict:
         """Fetch a task by ID via tasks/get JSON-RPC call.
 
-        Returns the task dict (unwrapped from the JSON-RPC envelope).
-        Raises on network or HTTP errors.
-
-        Args:
-            timeout: Per-request read timeout in seconds.  When ``None``,
-                the client's default (``self._read_timeout``) is used.
+        If the primary interface returns a fallback-eligible error AND the
+        agent has a fallback_interface, retries GetTask on the fallback
+        rather than bubbling up A2AVersionFallbackError (which would cause
+        dispatch() to resend the entire message).
         """
+        iface = interface or agent.interface
+        try:
+            return await self._do_fetch_task(agent, task_id, iface, timeout)
+        except A2AVersionFallbackError:
+            fb = agent.fallback_interface
+            if fb and fb != iface:
+                logger.info(
+                    "GetTask on %s failed with version error — retrying on fallback %s",
+                    iface.url, fb.url,
+                )
+                return await self._do_fetch_task(agent, task_id, fb, timeout)
+            raise
+
+    async def _do_fetch_task(
+        self, agent: LocalAgent, task_id: str,
+        iface: ResolvedInterface,
+        timeout: float | None = None,
+    ) -> dict:
+        """Low-level task fetch on a specific interface."""
+        version = iface.protocol_version
+        method = a2a_compat.get_method_name("get_task", version)
+        headers = {"Content-Type": "application/json", **a2a_compat.get_headers(version)}
         client = await self._get_client()
         body = {
             "jsonrpc": "2.0",
             "id": uuid4().hex,
-            "method": "tasks/get",
+            "method": method,
             "params": {"id": task_id},
         }
-        kwargs: dict[str, Any] = {
-            "json": body,
-            "headers": {"Content-Type": "application/json"},
-        }
+        kwargs: dict[str, Any] = {"json": body, "headers": headers}
         if timeout is not None:
             kwargs["timeout"] = httpx.Timeout(
                 connect=10.0, read=timeout, write=30.0, pool=5.0,
             )
-        resp = await client.post(agent.url, **kwargs)
-        resp.raise_for_status()
-        raw = resp.json()
-        return raw.get("result", raw)
+        resp = await client.post(iface.url, **kwargs)
+        raw = self._check_response(resp)
+        normalized = a2a_compat.extract_response(raw, version)
+        return normalized.get("result", normalized)
 
     async def _refetch_final_task(
         self, agent: LocalAgent, result: DispatchResult,
+        interface: ResolvedInterface | None = None,
     ) -> DispatchResult:
-        """Re-fetch the completed task from the agent to get definitive response text.
-
-        Called when streaming finished but both text accumulators are empty,
-        mirroring the cloud path's task re-fetch on terminal status.
-        """
+        """Re-fetch the completed task from the agent to get definitive response text."""
         logger.info(
             "Streaming produced no text — re-fetching task %s from %s",
             result.task_id, agent.name,
         )
         try:
-            task_data = await self._fetch_task(agent, result.task_id)
+            task_data = await self._fetch_task(agent, result.task_id, interface=interface)
 
             text, non_text = self._collect_parts_from_task(task_data)
             if text:
@@ -326,18 +407,9 @@ class Dispatcher:
         result: DispatchResult,
         poll_interval: float = 2.0,
         max_attempts: int = 30,
+        interface: ResolvedInterface | None = None,
     ) -> DispatchResult:
-        """Poll tasks/get until the task reaches a terminal or interactive state.
-
-        Called when a sync message/send with blocking=True still returns a
-        non-terminal state (submitted/working), indicating the agent ignored
-        the blocking hint.  Polls up to *max_attempts* times with
-        *poll_interval* seconds between each attempt.
-
-        TODO(long-running): Replace fixed poll_interval with exponential
-        backoff (e.g. min_interval=2, max_interval=60, multiplier=2) and
-        make max_attempts configurable via HubConfig for long-running agents.
-        """
+        """Poll tasks/get until the task reaches a terminal or interactive state."""
         logger.info(
             "Sync dispatch returned non-terminal state '%s' — polling task %s on %s",
             result.task_state, result.task_id, agent.name,
@@ -348,6 +420,7 @@ class Dispatcher:
 
             task_data = await self._fetch_task(
                 agent, result.task_id, timeout=POLL_REQUEST_TIMEOUT,
+                interface=interface,
             )
 
             state = task_data.get("status", {}).get("state")
@@ -385,77 +458,92 @@ class Dispatcher:
 
         return result
 
-    async def _dispatch_sync(self, agent: LocalAgent, message_dict: dict) -> DispatchResult:
-        """Send a synchronous A2A message/send request with blocking=True.
-
-        Non-streaming agents may take a long time to respond.  Sending
-        ``blocking=True`` asks the agent to hold the HTTP connection and return
-        the result directly, avoiding a push-notification round-trip that would
-        require a reachable webhook URL.
-
-        TODO(long-running): For agents with estimated execution times beyond
-        the read timeout, send blocking=False and rely entirely on polling
-        via _poll_until_terminal. This avoids tying up an HTTP connection
-        for the full duration and is more resilient to network interruptions.
-        """
+    async def _dispatch_sync(
+        self, agent: LocalAgent, message_dict: dict,
+        interface: ResolvedInterface | None = None,
+    ) -> DispatchResult:
+        """Send a synchronous A2A send request with blocking=True."""
+        iface = interface or agent.interface
+        version = iface.protocol_version
         configuration: dict[str, Any] = {"blocking": True}
-        request_body = self._build_jsonrpc(message_dict, method="message/send", configuration=configuration)
-        client = await self._get_client()
-
-        resp = await client.post(
-            agent.url,
-            json=request_body,
-            headers={"Content-Type": "application/json"},
+        request_body = self._build_jsonrpc(
+            message_dict, base_method="send", version=version, configuration=configuration,
         )
-        resp.raise_for_status()
-        raw = resp.json()
-        return self._extract_response_content(raw)
+        client = await self._get_client()
+        headers = {"Content-Type": "application/json", **a2a_compat.get_headers(version)}
+
+        resp = await client.post(iface.url, json=request_body, headers=headers)
+        raw = self._check_response(resp)
+        normalized = a2a_compat.extract_response(raw, version)
+        return self._extract_response_content(normalized)
 
     # ──── Streaming dispatch (message/stream) ────
 
     async def _dispatch_streaming(
         self, agent: LocalAgent, message_dict: dict, agent_message_id: str,
+        interface: ResolvedInterface | None = None,
     ) -> AsyncIterator[DispatchEvent]:
-        """Send a streaming A2A message/stream request, yield classified events.
-
-        Uses the ``kind`` discriminator per A2A spec RC v1.0 to classify
-        each SSE event into typed publish events.
-        """
-        request_body = self._build_jsonrpc(message_dict, method="message/stream")
+        """Send a streaming A2A stream request, yield classified events."""
+        iface = interface or agent.interface
+        version = iface.protocol_version
+        request_body = self._build_jsonrpc(
+            message_dict, base_method="stream", version=version,
+        )
         client = await self._get_client()
+        headers = {"Content-Type": "application/json", **a2a_compat.get_headers(version)}
 
         async with aconnect_sse(
-            client, "POST", agent.url,
+            client, "POST", iface.url,
             json=request_body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         ) as event_source:
+            first_event = True
             async for sse in event_source.aiter_sse():
                 try:
                     data = json.loads(sse.data)
                 except (json.JSONDecodeError, TypeError):
                     continue
 
-                inner = data.get("result", data)
-                kind = inner.get("kind", "")
+                if first_event:
+                    first_event = False
+                    err = a2a_compat.extract_jsonrpc_error(data)
+                    if err:
+                        if err.code in a2a_compat.FALLBACK_ELIGIBLE_CODES:
+                            raise A2AVersionFallbackError(
+                                f"JSON-RPC error {err.code}: {err.message}"
+                            )
+                        raise RuntimeError(
+                            f"JSON-RPC error {err.code}: {err.message}"
+                        )
 
-                if kind == "artifact-update":
-                    text = self._extract_artifact_text(inner)
-                    raw_parts = self._collect_non_text_parts_from_artifact(inner)
+                inner = data.get("result", data)
+                classified = a2a_compat.classify_stream_event(inner, version)
+
+                if classified is None:
+                    if inner.get("kind", ""):
+                        logger.warning("Unknown streaming event kind: %s", inner.get("kind"))
+                    continue
+
+                event_type, payload = classified
+
+                if event_type == "artifact-update":
+                    text = self._extract_artifact_text(payload)
+                    raw_parts = self._collect_non_text_parts_from_artifact(payload)
                     yield DispatchEvent(
                         type="artifact_update",
                         agent_message_id=agent_message_id,
                         data={
-                            "raw": inner,
+                            "raw": payload,
                             "text": text,
                             "parts": raw_parts,
-                            "append": inner.get("append", False),
-                            "last_chunk": inner.get("lastChunk", inner.get("last_chunk", False)),
+                            "append": payload.get("append", False),
+                            "last_chunk": payload.get("lastChunk", payload.get("last_chunk", False)),
                         },
                     )
-                elif kind == "status-update":
-                    state = inner.get("status", {}).get("state")
-                    text = self._extract_status_text(inner)
-                    final = inner.get("final", False)
+                elif event_type == "status-update":
+                    state = payload.get("status", {}).get("state")
+                    text = self._extract_status_text(payload)
+                    final = payload.get("final", False)
                     yield DispatchEvent(
                         type="task_status",
                         agent_message_id=agent_message_id,
@@ -463,23 +551,23 @@ class Dispatcher:
                             "state": state,
                             "status_text": text,
                             "final": final,
-                            "task_id": inner.get("taskId", inner.get("task_id")),
-                            "context_id": inner.get("contextId", inner.get("context_id")),
-                            "raw": inner,
+                            "task_id": payload.get("taskId", payload.get("task_id")),
+                            "context_id": payload.get("contextId", payload.get("context_id")),
+                            "raw": payload,
                         },
                     )
-                elif kind == "task":
+                elif event_type == "task":
                     yield DispatchEvent(
                         type="task_submitted",
                         agent_message_id=agent_message_id,
                         data={
-                            "task_id": inner.get("id"),
-                            "context_id": inner.get("contextId", inner.get("context_id")),
+                            "task_id": payload.get("id"),
+                            "context_id": payload.get("contextId", payload.get("context_id")),
                         },
                     )
-                elif kind == "message":
-                    text = self._extract_message_text(inner)
-                    raw_parts = self._collect_non_text_parts_from_message(inner)
+                elif event_type == "message":
+                    text = self._extract_message_text(payload)
+                    raw_parts = self._collect_non_text_parts_from_message(payload)
                     if text or raw_parts:
                         artifact_parts = []
                         if text:
@@ -489,7 +577,7 @@ class Dispatcher:
                             type="artifact_update",
                             agent_message_id=agent_message_id,
                             data={
-                                "raw": inner,
+                                "raw": payload,
                                 "text": text,
                                 "parts": raw_parts,
                                 "append": True,
@@ -500,36 +588,56 @@ class Dispatcher:
                                 },
                             },
                         )
-                else:
-                    if kind:
-                        logger.warning("Unknown streaming event kind: %s", kind)
 
     # ──── JSON-RPC construction ────
 
     @staticmethod
     def _build_jsonrpc(
         message_dict: dict,
-        method: str,
+        base_method: str,
+        version: str,
         configuration: dict[str, Any] | None = None,
     ) -> dict:
-        """Build a JSON-RPC 2.0 envelope for an A2A message.
-
-        Args:
-            message_dict: The A2A Message payload.
-            method: JSON-RPC method name (e.g. ``"message/send"``).
-            configuration: Optional ``MessageSendConfiguration`` fields to
-                include in ``params.configuration``.  Streaming calls omit
-                this; sync calls pass ``{"blocking": True}``.
-        """
-        params: dict[str, Any] = {"message": message_dict}
-        if configuration:
-            params["configuration"] = configuration
+        """Build a JSON-RPC 2.0 envelope for an A2A message."""
+        method = a2a_compat.get_method_name(base_method, version)
+        params = a2a_compat.build_request_params(message_dict, version, configuration)
         return {
             "jsonrpc": "2.0",
             "id": uuid4().hex,
             "method": method,
             "params": params,
         }
+
+    @staticmethod
+    def _check_response(resp: httpx.Response) -> dict:
+        """Parse response JSON and check for JSON-RPC errors.
+
+        Raises A2AVersionFallbackError for fallback-eligible error codes.
+        Raises RuntimeError for other JSON-RPC errors or unparseable 2xx bodies.
+        Falls through to raise_for_status() for non-JSON non-2xx.
+        """
+        try:
+            raw = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            if resp.is_success:
+                raise RuntimeError(
+                    f"Agent returned HTTP {resp.status_code} with unparseable body"
+                )
+            resp.raise_for_status()
+            return {}  # unreachable, raise_for_status always throws for non-2xx
+
+        err = a2a_compat.extract_jsonrpc_error(raw)
+        if err:
+            if err.code in a2a_compat.FALLBACK_ELIGIBLE_CODES:
+                raise A2AVersionFallbackError(
+                    f"JSON-RPC error {err.code}: {err.message}"
+                )
+            raise RuntimeError(f"JSON-RPC error {err.code}: {err.message}")
+
+        if not resp.is_success:
+            resp.raise_for_status()
+
+        return raw
 
     # ──── Response extraction ────
 

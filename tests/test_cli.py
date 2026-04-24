@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import os
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import click
@@ -13,6 +15,7 @@ from click.testing import CliRunner
 
 from hub.cli import (
     _detect_installer_command,
+    _CLI_ADAPTERS,
     _installer_display_name,
     _installed_version,
     _parse_version,
@@ -22,6 +25,34 @@ from hub.cli import (
     _stop_daemon,
     main,
 )
+
+
+@pytest.fixture(autouse=True)
+def mock_a2a_adapter():
+    """Mock a2a_adapter so agent_start() can be exercised without the package installed."""
+    mock_serve = MagicMock()
+    mock_load = MagicMock(return_value=MagicMock())
+
+    mod_a2a = ModuleType("a2a_adapter")
+    mod_a2a.serve_agent = mock_serve
+
+    mod_loader = ModuleType("a2a_adapter.loader")
+    mod_loader.load_adapter = mock_load
+
+    saved = {}
+    for name in ("a2a_adapter", "a2a_adapter.loader"):
+        saved[name] = sys.modules.get(name)
+
+    sys.modules["a2a_adapter"] = mod_a2a
+    sys.modules["a2a_adapter.loader"] = mod_loader
+
+    yield {"load_adapter": mock_load, "serve_agent": mock_serve}
+
+    for name, original in saved.items():
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
 
 
 # ──── _parse_version ────
@@ -286,7 +317,7 @@ class TestUpdateCommand:
     def test_dry_run_shows_upgrades(self):
         with (
             patch("hub.cli._installed_version", side_effect=lambda p: {"hybro-hub": "0.1.16", "a2a-adapter": "0.2.5", "a2a-sdk": "0.3.25"}.get(p)),
-            patch("hub.cli._query_pypi_versions", return_value={"hybro-hub": "0.1.18", "a2a-adapter": "0.2.7", "a2a-sdk": "0.3.25"}),
+            patch("hub.cli._query_pypi_versions", return_value={"hybro-hub": "0.1.18", "a2a-adapter": "0.2.9", "a2a-sdk": "1.0.1"}),
         ):
             result = self._run(["--dry-run"])
         assert result.exit_code == 0
@@ -295,8 +326,8 @@ class TestUpdateCommand:
 
     def test_already_up_to_date(self):
         with (
-            patch("hub.cli._installed_version", side_effect=lambda p: {"hybro-hub": "0.1.18", "a2a-adapter": "0.2.7", "a2a-sdk": "0.3.25"}.get(p)),
-            patch("hub.cli._query_pypi_versions", return_value={"hybro-hub": "0.1.18", "a2a-adapter": "0.2.7", "a2a-sdk": "0.3.25"}),
+            patch("hub.cli._installed_version", side_effect=lambda p: {"hybro-hub": "0.1.18", "a2a-adapter": "0.2.9", "a2a-sdk": "1.0.1"}.get(p)),
+            patch("hub.cli._query_pypi_versions", return_value={"hybro-hub": "0.1.18", "a2a-adapter": "0.2.9", "a2a-sdk": "1.0.1"}),
         ):
             result = self._run()
         assert result.exit_code == 0
@@ -421,3 +452,333 @@ class TestVersionFlag:
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
         assert "hybro-hub" in result.output
+
+
+# ──── CLI integration: hybro-hub agent start claude-code/codex ────
+
+
+class TestCLIAdapters:
+    def test_claude_code_registered(self):
+        assert "claude-code" in _CLI_ADAPTERS
+
+    def test_codex_registered(self):
+        assert "codex" in _CLI_ADAPTERS
+
+    def test_all_adapters_have_required_keys(self):
+        for name, info in _CLI_ADAPTERS.items():
+            assert "description" in info, f"{name} missing description"
+            assert "install_hint" in info, f"{name} missing install_hint"
+
+
+class TestAgentStartClaudeCode:
+    def test_claude_code_default_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(main, ["agent", "start", "claude-code"])
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["adapter"] == "claude-code"
+        assert "working_dir" in config
+        assert config["name"] == "Claude Code Agent"
+        mock_a2a_adapter["serve_agent"].assert_called_once()
+
+    def test_claude_code_explicit_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agent", "start", "claude-code", "--working-dir", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["working_dir"] == str(tmp_path)
+
+    def test_claude_code_custom_path(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "agent",
+                "start",
+                "claude-code",
+                "--working-dir",
+                str(tmp_path),
+                "--claude-path",
+                "/opt/bin/claude",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["claude_path"] == "/opt/bin/claude"
+
+    def test_claude_code_custom_name_and_port(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "agent",
+                "start",
+                "claude-code",
+                "--working-dir",
+                str(tmp_path),
+                "--name",
+                "My Claude",
+                "--port",
+                "9010",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["name"] == "My Claude"
+        _, kwargs = mock_a2a_adapter["serve_agent"].call_args
+        assert kwargs["port"] == 9010
+
+    def test_claude_code_with_timeout(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "agent",
+                "start",
+                "claude-code",
+                "--working-dir",
+                str(tmp_path),
+                "--timeout",
+                "300",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["timeout"] == 300
+
+    def test_claude_code_output_shows_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agent", "start", "claude-code", "--working-dir", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0
+        assert "Working dir:" in result.output
+        assert str(tmp_path) in result.output
+
+    def test_claude_code_no_claude_path_in_config(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agent", "start", "claude-code", "--working-dir", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert "claude_path" not in config
+
+
+class TestAgentStartCodex:
+    def test_codex_default_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(main, ["agent", "start", "codex"])
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["adapter"] == "codex"
+        assert config["name"] == "Codex Agent"
+        mock_a2a_adapter["serve_agent"].assert_called_once()
+
+    def test_codex_explicit_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agent", "start", "codex", "--working-dir", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["working_dir"] == str(tmp_path)
+
+    def test_codex_custom_path(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "agent",
+                "start",
+                "codex",
+                "--working-dir",
+                str(tmp_path),
+                "--codex-path",
+                "/opt/bin/codex",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["codex_path"] == "/opt/bin/codex"
+
+    def test_codex_with_timeout(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "agent",
+                "start",
+                "codex",
+                "--working-dir",
+                str(tmp_path),
+                "--timeout",
+                "600",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["timeout"] == 600
+
+    def test_codex_output_shows_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agent", "start", "codex", "--working-dir", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0
+        assert "Working dir:" in result.output
+
+    def test_codex_no_codex_path_in_config(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agent", "start", "codex", "--working-dir", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert "codex_path" not in config
+
+
+class TestWorkingDirValidation:
+    def test_claude_code_bad_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "agent",
+                "start",
+                "claude-code",
+                "--working-dir",
+                str(tmp_path / "nonexistent"),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "Working directory does not exist" in result.output
+        mock_a2a_adapter["load_adapter"].assert_not_called()
+
+    def test_codex_bad_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "agent",
+                "start",
+                "codex",
+                "--working-dir",
+                str(tmp_path / "nonexistent"),
+            ],
+        )
+        assert result.exit_code != 0
+        assert "Working directory does not exist" in result.output
+        mock_a2a_adapter["load_adapter"].assert_not_called()
+
+
+class TestConfigWorkingDirHandling:
+    def test_claude_code_config_defaults_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            config_path = Path("claude-agent.yaml")
+            config_path.write_text("adapter: claude-code\n", encoding="utf-8")
+            cwd = os.getcwd()
+
+            result = runner.invoke(main, ["agent", "start", "--config", str(config_path)])
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["working_dir"] == cwd
+        assert "Working dir:" in result.output
+
+    def test_codex_config_defaults_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            config_path = Path("codex-agent.yaml")
+            config_path.write_text("adapter: codex\n", encoding="utf-8")
+            cwd = os.getcwd()
+
+            result = runner.invoke(main, ["agent", "start", "--config", str(config_path)])
+
+        assert result.exit_code == 0, result.output
+        config = mock_a2a_adapter["load_adapter"].call_args[0][0]
+        assert config["working_dir"] == cwd
+        assert "Working dir:" in result.output
+
+    def test_claude_code_config_rejects_bad_working_dir(
+        self, tmp_path, mock_a2a_adapter,
+    ):
+        runner = CliRunner()
+        config_path = tmp_path / "claude-agent.yaml"
+        config_path.write_text(
+            f"adapter: claude-code\nworking_dir: {tmp_path / 'missing'}\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(main, ["agent", "start", "--config", str(config_path)])
+
+        assert result.exit_code != 0
+        assert "Working directory does not exist" in result.output
+        mock_a2a_adapter["load_adapter"].assert_not_called()
+
+    def test_codex_config_rejects_bad_working_dir(self, tmp_path, mock_a2a_adapter):
+        runner = CliRunner()
+        config_path = tmp_path / "codex-agent.yaml"
+        config_path.write_text(
+            f"adapter: codex\nworking_dir: {tmp_path / 'missing'}\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(main, ["agent", "start", "--config", str(config_path)])
+
+        assert result.exit_code != 0
+        assert "Working directory does not exist" in result.output
+        mock_a2a_adapter["load_adapter"].assert_not_called()
+
+
+class TestAdapterLoadingErrors:
+    def test_import_error(self, tmp_path, mock_a2a_adapter):
+        mock_a2a_adapter["load_adapter"].side_effect = ImportError("no module")
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agent", "start", "claude-code", "--working-dir", str(tmp_path)],
+        )
+        assert result.exit_code != 0
+        assert "Error" in result.output
+
+    def test_value_error(self, tmp_path, mock_a2a_adapter):
+        mock_a2a_adapter["load_adapter"].side_effect = ValueError("bad config")
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["agent", "start", "codex", "--working-dir", str(tmp_path)],
+        )
+        assert result.exit_code != 0
+        assert "Error" in result.output
+
+
+class TestInvalidAdapter:
+    def test_unknown_adapter_rejected(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["agent", "start", "unknown-adapter"])
+        assert result.exit_code != 0

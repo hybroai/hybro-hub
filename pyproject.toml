@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hybro-hub"
-version = "0.1.17"
+version = "0.1.18"
 description = "Hybro Hub — daemon and Gateway client for connecting local and cloud A2A agents on hybro.ai."
 readme = "README.md"
 license = "Apache-2.0"
@@ -29,9 +29,9 @@ dependencies = [
     "pyyaml>=6.0",
     "ruamel.yaml>=0.18",
     "click>=8.0",
-    "a2a-sdk>=1,<2",
+    "a2a-sdk>=1.0.1,<2",
     "psutil>=5.9",
-    "a2a-adapter",
+    "a2a-adapter>=0.2.9,<1",
 ]
 
 [project.optional-dependencies]

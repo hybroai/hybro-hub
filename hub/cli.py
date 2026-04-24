@@ -150,6 +150,18 @@ def _add_file_logging(verbose: bool) -> None:
     logging.getLogger().addHandler(handler)
 
 
+def _resolve_working_dir_or_exit(working_dir: str | None) -> str:
+    """Default and validate the working directory for local coding adapters."""
+    resolved = working_dir or os.getcwd()
+    if not os.path.isdir(resolved):
+        click.echo(
+            f"Error: Working directory does not exist: {resolved}",
+            err=True,
+        )
+        sys.exit(1)
+    return resolved
+
+
 def _spinning_wait(
     message: str,
     check_fn: Callable[[], bool],
@@ -895,6 +907,14 @@ _CLI_ADAPTERS = {
         "description": "n8n workflow via webhook",
         "install_hint": "pip install a2a-adapter",
     },
+    "claude-code": {
+        "description": "Claude Code AI coding agent",
+        "install_hint": "pip install a2a-adapter",
+    },
+    "codex": {
+        "description": "OpenAI Codex CLI coding agent",
+        "install_hint": "pip install a2a-adapter",
+    },
     "hermes": {
         "description": "Hermes Agent (tools, memory) via gateway pattern",
         "install_hint": "pip install a2a-adapter",
@@ -961,6 +981,9 @@ def _validate_ollama_model(model: str, base_url: str = "http://localhost:11434")
 @click.option("--agent-id", default=None, help="[openclaw] OpenClaw agent ID.")
 @click.option("--openclaw-path", default=None, help="[openclaw] Path to openclaw binary.")
 @click.option("--webhook-url", default=None, help="[n8n] Webhook URL (required for n8n).")
+@click.option("--working-dir", default=None, help="[claude-code/codex] Working directory for the agent.")
+@click.option("--claude-path", default=None, help="[claude-code] Path to claude binary.")
+@click.option("--codex-path", default=None, help="[codex] Path to codex binary.")
 @click.option("--provider", default=None, help="[hermes] LLM provider override (optional).")
 @click.option(
     "--enabled-toolsets",
@@ -982,13 +1005,16 @@ def agent_start(
     agent_id: str | None,
     openclaw_path: str | None,
     webhook_url: str | None,
+    working_dir: str | None,
+    claude_path: str | None,
+    codex_path: str | None,
     provider: str | None,
     enabled_toolsets: str | None,
     timeout: int | None,
 ) -> None:
     """Start a local A2A agent adapter.
 
-    Supported adapters: ollama, openclaw, n8n, hermes.
+    Supported adapters: claude-code, codex, hermes, ollama, openclaw, n8n.
 
     \b
     CLI flags are a convenience shortcut for common parameters.
@@ -997,6 +1023,8 @@ def agent_start(
 
     \b
     Examples:
+      hybro-hub agent start claude-code --working-dir /path/to/project
+      hybro-hub agent start codex --working-dir /path/to/project
       hybro-hub agent start ollama
       hybro-hub agent start ollama --model mistral:7b --port 10020
       hybro-hub agent start openclaw --thinking medium
@@ -1041,8 +1069,23 @@ def agent_start(
             config["name"] = agent_name
         if timeout:
             config["timeout"] = timeout
+        if working_dir:
+            config["working_dir"] = working_dir
+        if claude_path:
+            config["claude_path"] = claude_path
+        if codex_path:
+            config["codex_path"] = codex_path
+        if provider:
+            config["provider"] = provider
+        if enabled_toolsets:
+            ts = [s.strip() for s in enabled_toolsets.split(",") if s.strip()]
+            config["enabled_toolsets"] = ts if ts else ["hermes-cli"]
         adapter_type_display = config["adapter"]
         effective_port = config.get("port", port)
+        if adapter_type_display in ("claude-code", "codex"):
+            config["working_dir"] = _resolve_working_dir_or_exit(
+                config.get("working_dir")
+            )
     else:
         # adapter_type is guaranteed non-None here
         config = {"adapter": adapter_type}
@@ -1078,6 +1121,24 @@ def agent_start(
             config["webhook_url"] = webhook_url
             config["name"] = agent_name or "n8n Workflow Agent"
             config["description"] = "n8n workflow agent"
+            if timeout:
+                config["timeout"] = timeout
+
+        elif adapter_type == "claude-code":
+            config["working_dir"] = _resolve_working_dir_or_exit(working_dir)
+            config["name"] = agent_name or "Claude Code Agent"
+            config["description"] = "Claude Code AI coding agent"
+            if claude_path:
+                config["claude_path"] = claude_path
+            if timeout:
+                config["timeout"] = timeout
+
+        elif adapter_type == "codex":
+            config["working_dir"] = _resolve_working_dir_or_exit(working_dir)
+            config["name"] = agent_name or "Codex Agent"
+            config["description"] = "OpenAI Codex CLI coding agent"
+            if codex_path:
+                config["codex_path"] = codex_path
             if timeout:
                 config["timeout"] = timeout
 
@@ -1130,6 +1191,8 @@ def agent_start(
     elif adapter_type_display == "n8n":
         wh = config.get("webhook_url") or webhook_url
         click.echo(f"  Webhook: {wh}")
+    elif adapter_type_display in ("claude-code", "codex"):
+        click.echo(f"  Working dir: {config['working_dir']}")
     elif adapter_type_display == "hermes":
         m = config.get("model")
         click.echo(f"  Model:    {m if m else '(from Hermes ~/.hermes/config.yaml)'}")

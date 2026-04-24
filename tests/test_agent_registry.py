@@ -52,6 +52,35 @@ SAMPLE_CARD = {
     "defaultOutputModes": ["text"],
 }
 
+from hub.a2a_compat import ResolvedInterface
+
+
+V10_SAMPLE_CARD = {
+    "name": "Modern Agent",
+    "description": "A v1.0 agent",
+    "supportedInterfaces": [
+        {
+            "protocolBinding": "JSONRPC",
+            "protocolVersion": "1.0",
+            "url": "http://localhost:9001/a2a",
+        },
+    ],
+    "capabilities": {"streaming": True},
+    "skills": [{"id": "s1", "name": "Skill", "description": "A skill", "tags": ["chat"]}],
+}
+
+DUAL_MODE_SAMPLE_CARD = {
+    "name": "Dual Agent",
+    "description": "Speaks both protocols",
+    "url": "http://localhost:9001/",
+    "supportedInterfaces": [
+        {"protocolBinding": "JSONRPC", "protocolVersion": "1.0", "url": "http://localhost:9001/v1"},
+        {"protocolBinding": "JSONRPC", "protocolVersion": "0.3", "url": "http://localhost:9001/v03"},
+    ],
+    "capabilities": {"streaming": False},
+    "skills": [],
+}
+
 
 class TestDiscovery:
     @pytest.mark.asyncio
@@ -550,3 +579,191 @@ class TestScanRangeValidator:
     def test_start_greater_than_end(self):
         with pytest.raises(pydantic.ValidationError, match="start.*must be <= end"):
             self._make([9000, 8000])
+
+
+class TestV10Discovery:
+    @pytest.mark.asyncio
+    async def test_discover_v10_agent(self, config):
+        registry = AgentRegistry(config)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = V10_SAMPLE_CARD
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        registry._client = mock_client
+
+        agents = await registry.discover()
+        assert len(agents) == 1
+        agent = agents[0]
+        assert agent.interface.protocol_version == "1.0"
+        assert agent.interface.url == "http://localhost:9001/a2a"
+        assert agent.fallback_interface is not None
+        assert agent.fallback_interface.protocol_version == "0.3"
+        await registry.close()
+
+    @pytest.mark.asyncio
+    async def test_discover_v03_agent_has_v03_interface(self, config):
+        registry = AgentRegistry(config)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_CARD
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        registry._client = mock_client
+
+        agents = await registry.discover()
+        assert len(agents) == 1
+        agent = agents[0]
+        assert agent.interface.protocol_version == "0.3"
+        assert agent.fallback_interface is None
+        await registry.close()
+
+    @pytest.mark.asyncio
+    async def test_discover_dual_mode_agent(self, config):
+        registry = AgentRegistry(config)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = DUAL_MODE_SAMPLE_CARD
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        registry._client = mock_client
+
+        agents = await registry.discover()
+        assert len(agents) == 1
+        agent = agents[0]
+        assert agent.interface.protocol_version == "1.0"
+        assert agent.interface.url == "http://localhost:9001/v1"
+        assert agent.fallback_interface is not None
+        assert agent.fallback_interface.url == "http://localhost:9001/v03"
+        await registry.close()
+
+
+class TestRediscoveryRefreshesFields:
+    @pytest.mark.asyncio
+    async def test_rediscovery_updates_description_and_capabilities(self, config):
+        registry = AgentRegistry(config)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_CARD
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        registry._client = mock_client
+
+        agents = await registry.discover()
+        assert len(agents) == 1
+        agent = agents[0]
+        assert agent.description == "A test agent"
+        assert "streaming" in agent.capabilities
+
+        updated_card = {
+            **SAMPLE_CARD,
+            "description": "Updated description",
+            "capabilities": {},
+        }
+        mock_resp2 = MagicMock()
+        mock_resp2.status_code = 200
+        mock_resp2.json.return_value = updated_card
+        mock_client.get = AsyncMock(return_value=mock_resp2)
+
+        await registry.discover()
+        assert agent.description == "Updated description"
+        assert "streaming" not in agent.capabilities
+        await registry.close()
+
+    @pytest.mark.asyncio
+    async def test_rediscovery_resets_failure_counter(self, config):
+        registry = AgentRegistry(config)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_CARD
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        registry._client = mock_client
+
+        agents = await registry.discover()
+        agent = agents[0]
+
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("down"))
+        await registry.health_check()
+        await registry.health_check()
+        assert agent.healthy is False
+
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        await registry.discover()
+        assert agent.healthy is True
+
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("down"))
+        await registry.health_check()
+        assert agent.healthy is False
+        assert agent.local_agent_id in registry._agents
+        await registry.close()
+
+
+class TestHealthCheckRefreshesFields:
+    @pytest.mark.asyncio
+    async def test_health_check_updates_interface_and_description(self, config):
+        registry = AgentRegistry(config)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_CARD
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        registry._client = mock_client
+
+        agents = await registry.discover()
+        agent = agents[0]
+        assert agent.interface.protocol_version == "0.3"
+        assert agent.description == "A test agent"
+
+        upgraded_card = {
+            **V10_SAMPLE_CARD,
+            "description": "Now v1.0",
+        }
+        mock_resp2 = MagicMock()
+        mock_resp2.status_code = 200
+        mock_resp2.json.return_value = upgraded_card
+        mock_client.get = AsyncMock(return_value=mock_resp2)
+
+        await registry.health_check()
+        assert agent.interface.protocol_version == "1.0"
+        assert agent.description == "Now v1.0"
+        await registry.close()
+
+    @pytest.mark.asyncio
+    async def test_health_check_marks_unhealthy_on_unusable_card(self, config):
+        registry = AgentRegistry(config)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = SAMPLE_CARD
+        mock_client = AsyncMock()
+        mock_client.is_closed = False
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        registry._client = mock_client
+
+        agents = await registry.discover()
+        agent = agents[0]
+        assert agent.healthy is True
+        old_card = agent.agent_card
+
+        grpc_only_card = {
+            "name": "gRPC Agent",
+            "supportedInterfaces": [
+                {"protocolBinding": "gRPC", "url": "grpc://localhost:50051"},
+            ],
+        }
+        mock_resp2 = MagicMock()
+        mock_resp2.status_code = 200
+        mock_resp2.json.return_value = grpc_only_card
+        mock_client.get = AsyncMock(return_value=mock_resp2)
+
+        await registry.health_check()
+        assert agent.healthy is False
+        assert agent.agent_card is old_card
+        assert agent.interface.protocol_version == "0.3"
+        await registry.close()

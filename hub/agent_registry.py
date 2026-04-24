@@ -25,10 +25,10 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse, urlunparse
 
 import httpx
-from a2a.types import AgentCard
 from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
-from google.protobuf.json_format import ParseDict
 
+from . import a2a_compat
+from .a2a_compat import ResolvedInterface
 from .config import HubConfig
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,16 @@ class LocalAgent:
     capabilities: list[str] = field(default_factory=list)
     agent_card: dict = field(default_factory=dict)
     healthy: bool = True
+    interface: ResolvedInterface | None = None
+    fallback_interface: ResolvedInterface | None = None
+
+    def __post_init__(self) -> None:
+        if self.interface is None:
+            self.interface = ResolvedInterface(
+                binding="JSONRPC",
+                protocol_version="0.3",
+                url=self.url,
+            )
 
 
 class AgentRegistry:
@@ -143,6 +153,13 @@ class AgentRegistry:
         if card is None:
             return None
 
+        try:
+            interface = a2a_compat.select_interface(card)
+        except ValueError:
+            logger.debug("Agent card at %s has no usable JSON-RPC interface", url)
+            return None
+        fallback = a2a_compat.select_fallback_interface(card, interface)
+
         agent_name = name or card.get("name", f"Agent@{url}")
         existing = next(
             (a for a in self._agents.values() if a.url == url), None
@@ -151,6 +168,11 @@ class AgentRegistry:
             existing.agent_card = card
             existing.healthy = True
             existing.name = agent_name
+            existing.description = card.get("description", "")
+            existing.capabilities = _extract_capabilities(card)
+            existing.interface = interface
+            existing.fallback_interface = fallback
+            self._failure_counts.pop(existing.local_agent_id, None)
             return existing
 
         local_id = hashlib.sha256(url.encode()).hexdigest()[:12]
@@ -162,9 +184,14 @@ class AgentRegistry:
             capabilities=_extract_capabilities(card),
             agent_card=card,
             healthy=True,
+            interface=interface,
+            fallback_interface=fallback,
         )
         self._agents[local_id] = agent
-        logger.info("Discovered agent: %s at %s (id=%s)", agent_name, url, local_id)
+        logger.info(
+            "Discovered agent: %s at %s (id=%s, protocol=%s)",
+            agent_name, url, local_id, interface.protocol_version,
+        )
         return agent
 
     # ──── Health check ────
@@ -179,8 +206,32 @@ class AgentRegistry:
         for agent in list(self._agents.values()):
             card = await self._fetch_agent_card(agent.url)
             if card is not None:
+                try:
+                    new_iface = a2a_compat.select_interface(card)
+                except ValueError:
+                    logger.warning(
+                        "Agent %s returned card with no usable interface — marking unhealthy",
+                        agent.name,
+                    )
+                    agent.healthy = False
+                    count = self._failure_counts.get(agent.local_agent_id, 0) + 1
+                    self._failure_counts[agent.local_agent_id] = count
+                    if count >= self.HEALTH_FAILURE_THRESHOLD:
+                        logger.warning(
+                            "Agent %s failed %d consecutive health checks — removing",
+                            agent.name, count,
+                        )
+                        del self._agents[agent.local_agent_id]
+                        self._failure_counts.pop(agent.local_agent_id, None)
+                    continue
                 agent.healthy = True
                 agent.agent_card = card
+                agent.description = card.get("description", "")
+                agent.capabilities = _extract_capabilities(card)
+                agent.interface = new_iface
+                agent.fallback_interface = a2a_compat.select_fallback_interface(
+                    card, new_iface,
+                )
                 self._failure_counts.pop(agent.local_agent_id, None)
             else:
                 agent.healthy = False
@@ -207,9 +258,8 @@ class AgentRegistry:
     async def _fetch_agent_card(self, url: str, source: str = "config") -> dict | None:
         """Try each well-known agent card path and return the first valid card.
 
-        Validates the response by parsing into the SDK ``AgentCard`` protobuf
-        to reject non-agent HTTP 200 responses (e.g. error JSON from unrelated
-        servers).
+        Validates the response with a2a_compat.validate_agent_card() to reject
+        non-agent HTTP 200 responses (e.g. error JSON from unrelated servers).
         """
         client = await self._get_client()
         for path in AGENT_CARD_PATHS:
@@ -217,15 +267,8 @@ class AgentRegistry:
                 resp = await client.get(f"{url}{path}")
                 if resp.status_code == 200:
                     card_data = resp.json()
-                    proto = AgentCard()
-                    ParseDict(
-                        card_data,
-                        proto,
-                        ignore_unknown_fields=True,
-                    )
-                    if not proto.name.strip():
-                        continue
-                    return card_data
+                    if a2a_compat.validate_agent_card(card_data) is not None:
+                        return card_data
             except Exception:
                 continue
         if source == "config":
