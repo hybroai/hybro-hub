@@ -662,8 +662,35 @@ class TestDispatchStreaming:
         assert second["data"]["text"] == "world"
         assert second["data"]["artifact"]["parts"] == [{"kind": "text", "text": "world"}]
 
-        response = next(e for e in terminal_events if e["type"] == "agent_response")
-        assert response["data"]["content"] == "Hello world"
+        # Stream already emitted visible text and terminal adds no richer text,
+        # so dispatcher suppresses duplicate terminal agent_response.
+        assert not any(e["type"] == "agent_response" for e in terminal_events)
+        status = next(e for e in terminal_events if e["type"] == "processing_status")
+        assert status["data"]["status"] == "completed"
+        assert status["data"]["user_message_id"] == "um-001"
+
+    def test_emit_terminal_keeps_agent_response_when_terminal_text_is_richer(self):
+        """Suppression should not trigger when terminal text adds richer content."""
+        dispatcher = Dispatcher()
+        from hub.dispatcher import DispatchResult
+
+        result = DispatchResult(
+            task_state="completed",
+            artifact_text="Hello",
+            text="Hello world with extra details",
+        )
+        events: list[dict] = []
+        dispatcher._emit_terminal_events(
+            events,
+            result,
+            "am-stream-001b",
+            "um-001b",
+            agent_id="test_002",
+            stream_emitted_content=True,
+        )
+
+        response = next(e for e in events if e["type"] == "agent_response")
+        assert response["data"]["content"] == "Hello world with extra details"
         assert response["data"]["agent_id"] == "test_002"
 
     @pytest.mark.asyncio
@@ -1366,8 +1393,11 @@ class TestV10Streaming:
         assert status_events[0]["data"]["state"] == "completed"
         assert status_events[0]["data"]["final"] is True
 
-        response = next(e for e in terminal if e["type"] == "agent_response")
-        assert response["data"]["content"] == "v1 chunk"
+        # Stream already emitted artifact text; terminal duplicate agent_response is suppressed.
+        assert not any(e["type"] == "agent_response" for e in terminal)
+        done = next(e for e in terminal if e["type"] == "processing_status")
+        assert done["data"]["status"] == "completed"
+        assert done["data"]["user_message_id"] == "um-v10-stream"
 
     @pytest.mark.asyncio
     async def test_v10_stream_message_kind(self, v10_streaming_agent):

@@ -59,6 +59,7 @@ class DispatchResult:
     context_id: str | None = None
     error: str | None = None
     error_type: str | None = None
+    stream_emitted_content: bool = False
 
 
 class Dispatcher:
@@ -150,7 +151,14 @@ class Dispatcher:
             result.error_type = type(exc).__name__
 
         terminal: list[dict] = []
-        self._emit_terminal_events(terminal, result, agent_message_id, user_message_id, agent.local_agent_id)
+        self._emit_terminal_events(
+            terminal,
+            result,
+            agent_message_id,
+            user_message_id,
+            agent.local_agent_id,
+            stream_emitted_content=result.stream_emitted_content,
+        )
         yield terminal
 
     async def _dispatch_with_interface(
@@ -168,6 +176,11 @@ class Dispatcher:
                 if event.type in ("artifact_update", "task_status"):
                     yield [ev_dict]
                 if event.type == "artifact_update":
+                    # Streaming already emitted visible output for this message.
+                    # Suppress the final synthetic agent_response event later to
+                    # avoid duplicate rendering in downstream consumers.
+                    if event.data.get("text") or event.data.get("parts"):
+                        result.stream_emitted_content = True
                     result.artifact_text += event.data.get("text", "")
                 elif event.type == "task_status":
                     result.task_state = event.data.get("state")
@@ -206,6 +219,7 @@ class Dispatcher:
         agent_message_id: str,
         user_message_id: str | None,
         agent_id: str | None = None,
+        stream_emitted_content: bool = False,
     ) -> None:
         """Emit the terminal events (response/error + processing_status)."""
         if result.error:
@@ -260,7 +274,24 @@ class Dispatcher:
             ).to_publish_dict())
             return
 
-        response_text = result.artifact_text or result.text
+        artifact_text = (result.artifact_text or "").strip()
+        terminal_text = (result.text or "").strip()
+        # Prefer the richer text payload. Streaming artifact text can be partial
+        # for some agents; when terminal text is longer, use it to avoid trimmed
+        # prefixes in the final response.
+        response_text = terminal_text if len(terminal_text) > len(artifact_text) else (artifact_text or terminal_text)
+
+        # Streaming path already emitted artifact/message content incrementally.
+        # If terminal text doesn't add anything richer, suppress agent_response
+        # and keep only processing_status to avoid duplicate rendering.
+        if stream_emitted_content and (not terminal_text or len(terminal_text) <= len(artifact_text)):
+            events.append(DispatchEvent(
+                type="processing_status",
+                agent_message_id=agent_message_id,
+                data={"status": "completed", "user_message_id": user_message_id},
+            ).to_publish_dict())
+            return
+
         response_data: dict[str, Any] = {"content": response_text}
         if agent_id is not None:
             response_data["agent_id"] = agent_id
