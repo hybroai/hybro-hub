@@ -151,7 +151,9 @@ class TestHandleUserReplyAgentNotFound:
         daemon = _make_daemon()
         daemon.registry.get_agent.return_value = None
 
-        await daemon._handle_user_reply(_full_user_reply_event())
+        await daemon._handle_user_reply(
+            _full_user_reply_event(user_message_id="user-turn-1"),
+        )
 
         daemon.relay.publish.assert_called_once()
         room_id, events = daemon.relay.publish.call_args[0]
@@ -160,18 +162,34 @@ class TestHandleUserReplyAgentNotFound:
         assert events[0]["data"]["error_type"] == "AgentNotFound"
         assert events[1]["type"] == "processing_status"
         assert events[1]["data"]["status"] == "failed"
+        assert events[1]["data"]["user_message_id"] == "user-turn-1"
 
 
 class TestHandleUserReplyIncompleteEvent:
     async def test_publishes_failure_when_local_agent_id_missing(self):
         daemon = _make_daemon()
-        event = _full_user_reply_event(local_agent_id=None)
+        event = _full_user_reply_event(
+            local_agent_id=None,
+            user_message_id="user-turn-1",
+        )
 
         await daemon._handle_user_reply(event)
 
         daemon.relay.publish.assert_called_once()
         _, events = daemon.relay.publish.call_args[0]
         assert events[0]["data"]["error_type"] == "InvalidEvent"
+        assert events[1]["data"]["user_message_id"] == "user-turn-1"
+
+    async def test_uses_originating_user_message_id_on_failure(self):
+        daemon = _make_daemon()
+        daemon.registry.get_agent.return_value = None
+
+        await daemon._handle_user_reply(
+            _full_user_reply_event(originating_user_message_id="user-turn-2"),
+        )
+
+        _, events = daemon.relay.publish.call_args[0]
+        assert events[1]["data"]["user_message_id"] == "user-turn-2"
 
     async def test_no_publish_when_room_id_and_msg_id_both_missing(self):
         daemon = _make_daemon()
@@ -565,14 +583,16 @@ class TestHeartbeatLoop:
 
 class TestHandleUserReplyCanonicalParts:
     async def test_hitl_reply_uses_flattened_parts(self):
-        """HITL reply must use canonical flattened parts (no 'kind')."""
+        """Legacy reply_text path uses canonical flattened parts (no 'kind')."""
         daemon = _make_daemon()
         daemon.registry.get_agent.return_value = AGENT
 
         dispatched_message = {}
+        dispatched_user_message_id = {}
 
         async def _capture_dispatch(**kwargs):
             dispatched_message.update(kwargs.get("message_dict", {}))
+            dispatched_user_message_id["value"] = kwargs.get("user_message_id")
             yield [{"type": "agent_response", "agent_message_id": "amsg-12345678", "data": {"content": "ok"}}]
 
         daemon.dispatcher.dispatch = _capture_dispatch
@@ -583,6 +603,45 @@ class TestHandleUserReplyCanonicalParts:
         assert len(parts) == 1
         assert "kind" not in parts[0]
         assert parts[0]["text"] == "yes"
+        assert dispatched_user_message_id["value"] is None
+
+    async def test_hitl_reply_uses_full_message_payload_when_present(self):
+        daemon = _make_daemon()
+        daemon.registry.get_agent.return_value = AGENT
+
+        captured = {}
+
+        async def _capture_dispatch(**kwargs):
+            captured.update(kwargs)
+            yield [{"type": "agent_response", "agent_message_id": "amsg-12345678", "data": {"content": "ok"}}]
+
+        daemon.dispatcher.dispatch = _capture_dispatch
+
+        await daemon._handle_user_reply(
+            _full_user_reply_event(
+                message={
+                    "kind": "message",
+                    "role": "user",
+                    "parts": [
+                        {"kind": "text", "text": "publish"},
+                        {
+                            "kind": "file",
+                            "file": {
+                                "uri": "https://s3.example/file.png",
+                                "mimeType": "image/png",
+                                "name": "photo.png",
+                            },
+                        },
+                    ],
+                },
+                user_message_id="user-turn-1",
+                reply_text="publish",
+            )
+        )
+
+        message_dict = captured["message_dict"]
+        assert message_dict["parts"][1]["kind"] == "file"
+        assert captured["user_message_id"] == "user-turn-1"
 
 
 class TestLocalAgentDefaultInterface:

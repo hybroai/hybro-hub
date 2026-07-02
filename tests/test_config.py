@@ -13,12 +13,27 @@ from hub.config import (
     CloudConfig,
     HubConfig,
     _expand_env_vars,
+    is_hybro_cloud_gateway,
     load_config,
     save_api_key,
 )
 
 
 # ── _expand_env_vars ─────────────────────────────────────────────────────────
+
+
+class TestIsHybroCloudGateway:
+    def test_matches_default_cloud_hostname(self) -> None:
+        assert is_hybro_cloud_gateway("https://api.hybro.ai") is True
+        assert is_hybro_cloud_gateway("https://api.hybro.ai/") is True
+
+    def test_is_case_insensitive_on_hostname(self) -> None:
+        assert is_hybro_cloud_gateway("https://API.HYBRO.AI") is True
+
+    def test_rejects_self_hosted_and_path_substrings(self) -> None:
+        assert is_hybro_cloud_gateway("https://api.hybro.ai.local") is False
+        assert is_hybro_cloud_gateway("https://corp.example/api.hybro.ai/v1") is False
+        assert is_hybro_cloud_gateway("http://localhost:8000") is False
 
 
 class TestExpandEnvVars:

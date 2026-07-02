@@ -10,6 +10,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from typing import Any, get_origin
@@ -23,6 +24,13 @@ logger = logging.getLogger(__name__)
 HYBRO_DIR = Path.home() / ".hybro"
 HUB_ID_FILE = HYBRO_DIR / "hub_id"
 CONFIG_FILE = HYBRO_DIR / "config.yaml"
+HYBRO_CLOUD_GATEWAY_HOST = "api.hybro.ai"
+
+
+def is_hybro_cloud_gateway(gateway_url: str) -> bool:
+    """True when gateway_url targets the hosted Hybro cloud API hostname."""
+    host = urlparse(gateway_url).hostname
+    return (host or "").lower() == HYBRO_CLOUD_GATEWAY_HOST
 
 
 class LocalAgentConfig(BaseModel):

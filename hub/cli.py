@@ -13,6 +13,7 @@ import click
 import httpx
 
 from .config import (
+    is_hybro_cloud_gateway,
     load_config,
     save_api_key,
 )
@@ -498,9 +499,9 @@ def start(ctx: click.Context, api_key: str | None, foreground: bool) -> None:
         save_api_key(api_key)
 
     config = load_config(api_key=api_key)
-    if config.cloud.api_key is None:
+    if not config.cloud.api_key and is_hybro_cloud_gateway(config.cloud.gateway_url):
         click.echo(
-            "Error: No API key configured.\n"
+            "Error: No API key configured for hybro.ai.\n"
             "Run: hybro-hub start --api-key hybro_...\n"
             "Or set HYBRO_API_KEY environment variable.",
             err=True,
@@ -751,7 +752,7 @@ def status(ctx: click.Context) -> None:
                 await registry.close()
 
         async def _cloud_call() -> dict | None:
-            if config.cloud.api_key is None:
+            if not config.cloud.api_key and is_hybro_cloud_gateway(config.cloud.gateway_url):
                 return None
             relay = RelayClient(
                 gateway_url=config.cloud.gateway_url,
@@ -791,7 +792,7 @@ def status(ctx: click.Context) -> None:
         click.echo("")
 
         # ── Cloud relay output ────────────────────────────────────────────────
-        if config.cloud.api_key is None:
+        if not config.cloud.api_key and is_hybro_cloud_gateway(config.cloud.gateway_url):
             click.echo("     Cloud relay:   No API key — run: hybro-hub start --api-key hybro_...")
             return
 

@@ -360,6 +360,10 @@ class HubDaemon:
         reply_text = event.get("reply_text", "")
         task_id = event.get("task_id")
         context_id = event.get("context_id")
+        user_message_id = event.get("user_message_id") or event.get(
+            "originating_user_message_id"
+        )
+        message_dict = event.get("message")
 
         if not all([local_agent_id, room_id, agent_message_id]):
             logger.warning("Incomplete user_reply event: %s", event)
@@ -368,6 +372,7 @@ class HubDaemon:
                     room_id, agent_message_id,
                     error="Incomplete user_reply event received by hub",
                     error_type="InvalidEvent",
+                    user_message_id=user_message_id,
                 )
             return
 
@@ -378,19 +383,30 @@ class HubDaemon:
                 room_id, agent_message_id,
                 error=f"Agent '{local_agent_id}' is no longer available on this hub",
                 error_type="AgentNotFound",
+                user_message_id=user_message_id,
             )
             return
 
-        reply_message: dict[str, Any] = {
-            "role": "user",
-            "parts": [{"text": reply_text}],
-            "messageId": uuid4().hex,
-        }
-        if task_id:
-            reply_message["taskId"] = task_id
-            reply_message["referenceTaskIds"] = [task_id]
-        if context_id:
-            reply_message["contextId"] = context_id
+        if message_dict:
+            reply_message = dict(message_dict)
+            reply_message.setdefault("role", "user")
+            reply_message.setdefault("messageId", uuid4().hex)
+            if task_id:
+                reply_message.setdefault("taskId", task_id)
+                reply_message.setdefault("referenceTaskIds", [task_id])
+            if context_id:
+                reply_message.setdefault("contextId", context_id)
+        else:
+            reply_message = {
+                "role": "user",
+                "parts": [{"text": reply_text}],
+                "messageId": uuid4().hex,
+            }
+            if task_id:
+                reply_message["taskId"] = task_id
+                reply_message["referenceTaskIds"] = [task_id]
+            if context_id:
+                reply_message["contextId"] = context_id
 
         logger.info(
             "Dispatching HITL reply to %s (room=%s, msg=%s)",
@@ -408,6 +424,7 @@ class HubDaemon:
             agent=agent,
             message_dict=reply_message,
             agent_message_id=agent_message_id,
+            user_message_id=user_message_id,
         ):
             await self.relay.publish(room_id, batch)
             for ev in batch:
